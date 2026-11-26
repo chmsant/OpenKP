@@ -93,6 +93,11 @@ echo "Installing OpenKP in editable mode with [dev] extras"
 if [[ "$USE_UV" == "1" ]]; then
     uv pip install --quiet --python "$VENV_PY" -e "$PKG_DIR[dev]"
 else
+    if ! "$VENV_PY" -m pip --version >/dev/null 2>&1; then
+        echo "ERROR: $VENV_DIR has no pip (it was probably created by uv)." >&2
+        echo "Unset OPENKP_SETUP_NO_UV, or move the venv aside and re-run." >&2
+        exit 1
+    fi
     "$VENV_PY" -m pip install --quiet --upgrade pip
     "$VENV_PY" -m pip install --quiet -e "$PKG_DIR[dev]"
 fi
