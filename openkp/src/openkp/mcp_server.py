@@ -1074,7 +1074,7 @@ async def list_past_visits(
 
 
 @mcp.tool()
-async def read_visit_notes(csn: str) -> dict:
+async def read_visit_notes(csn: str, include_html: bool = False) -> dict:
     """Return clinical notes + rendered After Visit Summary for one past visit.
 
     Source: Kaiser's `/mychartcn/api/visit-notes/*` and `/api/report-content/
@@ -1085,6 +1085,10 @@ async def read_visit_notes(csn: str) -> dict:
     Args:
       csn: The `csn` field from a `list_past_visits` row. The same value is
         returned at the top level of a `PastVisit` object as `csn`.
+      include_html: Also return each note's raw HTML in `content_html`.
+        Off by default: the HTML repeats the text with markup and can make
+        a hospital stay's response many times larger. `content_html` is
+        null when off.
 
     Returns a dict shaped like the `VisitNotesResponse` pydantic model in
     `openkp.scrapers.visit_notes`. Each `VisitNote` carries:
@@ -1094,7 +1098,7 @@ async def read_visit_notes(csn: str) -> dict:
       - `iso` — note timestamp (ISO-8601 with Kaiser's offset).
       - `is_addendum`, `is_sensitive`, `provider_name`.
       - `content_text` — HTML-stripped plain text. Read this for content.
-      - `content_html` — raw Epic-rendered HTML, for callers that want it.
+      - `content_html` — raw Epic-rendered HTML, only with `include_html=True`.
 
     The `after_visit_summary` field, when populated, is the rendered AVS
     content (synthetic note-shaped object). `avs_pdf_dcs_id` is the handle
@@ -1114,7 +1118,13 @@ async def read_visit_notes(csn: str) -> dict:
     See `docs/research/endpoints/visit_notes.md`.
     """
     response = await _proxy_read(lambda client: fetch_visit_notes(client, csn))
-    return response.model_dump()
+    out = response.model_dump()
+    if not include_html:
+        for note in out.get("notes") or []:
+            note["content_html"] = None
+        if out.get("after_visit_summary"):
+            out["after_visit_summary"]["content_html"] = None
+    return out
 
 
 @mcp.tool()
