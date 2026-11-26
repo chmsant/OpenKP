@@ -200,10 +200,23 @@ responses. The list endpoint is a cheap summary view.
 | `results[0].reportDetails.isDownloadablePDFReport` | `has_pdf` |
 
 **Abnormal flag handling:** `abnormalFlagCategoryValue` is an enum. Observed
-values: `"Unknown"`, `"Normal"`, `"High"`, `"Low"` (inferred). Any value
-that isn't in `{Unknown, Normal, empty}` is surfaced as
-`LabComponent.is_abnormal = True`. The order-level `isAbnormal` boolean is
-Kaiser's own summary call and is reported directly.
+values: `"Unknown"`, `"Normal"`, `"High"`, `"Low"` (inferred). It comes back
+as `LabComponent.abnormal_flag`, as sent.
+
+Kaiser's flag under-reports. Live 2026-11-26: a point-of-care glucose of 176
+against `60 - 159` and an A1c of 6.7 against `<=5.6` both came back
+`"Unknown"`, with order-level `isAbnormal: false`. So OpenKP also computes
+`LabComponent.out_of_range` (`"high"` / `"low"` / null) from the reference
+range: numeric `low` / `high` when present (honoring the `*BoundExclusive`
+flags), else `formattedReferenceRange` in the forms `"<=5.6"`, `"<140"`,
+`">=60"`, `">60"`, `"60 - 159"`. Text ranges like `"Negative"` aren't
+interpreted.
+
+`LabComponent.is_abnormal` is true when Kaiser flags the value or it's out of
+range. The detail view's order-level `is_abnormal` is Kaiser's `isAbnormal` or
+any component's `is_abnormal`. The list view's `is_abnormal` is still Kaiser's
+order-level call only, since the list has no component values. Read the
+result for the full picture.
 
 **Reference range handling:** Kaiser returns `referenceRange` as a nested
 object, never a plain string in observed traffic. The

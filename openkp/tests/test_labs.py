@@ -909,3 +909,64 @@ async def test_download_lab_result_pdf_sanitizes_filename(tmp_path: Path):
     assert ":" not in outcome.filename
     assert "*" not in outcome.filename
     assert outcome.filename.endswith(".pdf") or outcome.filename.endswith(".PDF")
+
+
+# --- out-of-range detection (Kaiser often sends "Unknown") ---
+# Range shapes are from live responses (2026-11-26). Values are fabricated.
+
+_NUMERIC_RANGE = {"low": 60.0, "high": 159.0, "displayLow": "60", "displayHigh": "159",
+                  "lowerBoundExclusive": False, "upperBoundExclusive": False,
+                  "formattedReferenceRange": "60 - 159"}
+_TEXT_ONLY_RANGE = {"displayLow": "", "displayHigh": "", "lowerBoundExclusive": False,
+                    "upperBoundExclusive": False, "formattedReferenceRange": "<=5.6"}
+
+
+def _component(value, rng, flag="Unknown"):
+    return {
+        "componentInfo": {"name": "X", "commonName": "X", "units": "u"},
+        "componentResultInfo": {"value": str(value), "numericValue": value, "isValueRtf": False,
+                                "abnormalFlagCategoryValue": flag, "referenceRange": rng},
+        "componentComments": {},
+    }
+
+
+@pytest.mark.parametrize("value, rng, expect", [
+    (176, _NUMERIC_RANGE, "high"),
+    (59, _NUMERIC_RANGE, "low"),
+    (159, _NUMERIC_RANGE, None),
+    (60, _NUMERIC_RANGE, None),
+    (6.7, _TEXT_ONLY_RANGE, "high"),
+    (5.6, _TEXT_ONLY_RANGE, None),
+    (5.4, _TEXT_ONLY_RANGE, None),
+    (139, {"formattedReferenceRange": "<140"}, None),
+    (140, {"formattedReferenceRange": "<140"}, "high"),
+    (59, {"formattedReferenceRange": ">=60"}, "low"),
+    (60, {"formattedReferenceRange": ">60"}, "low"),
+    (60, {"low": 60.0, "lowerBoundExclusive": True}, "low"),
+    (5, {"formattedReferenceRange": "Negative"}, None),
+    (None, _NUMERIC_RANGE, None),
+    (5, None, None),
+])
+def test_out_of_range(value, rng, expect):
+    from openkp.scrapers.labs import _out_of_range
+    assert _out_of_range(value, rng) == expect
+
+
+def test_unknown_flag_out_of_range_value_is_abnormal():
+    from openkp.scrapers.labs import _parse_components
+    (c,) = _parse_components([_component(176, _NUMERIC_RANGE)])
+    assert c.abnormal_flag == "Unknown"
+    assert c.out_of_range == "high"
+    assert c.is_abnormal is True
+
+
+def test_kaiser_flag_still_counts_without_a_range():
+    from openkp.scrapers.labs import _parse_components
+    (c,) = _parse_components([_component(None, {}, flag="High")])
+    assert c.abnormal_flag == "High" and c.out_of_range is None and c.is_abnormal is True
+
+
+def test_in_range_unknown_flag_is_not_abnormal():
+    from openkp.scrapers.labs import _parse_components
+    (c,) = _parse_components([_component(5.4, _TEXT_ONLY_RANGE)])
+    assert c.is_abnormal is False and c.out_of_range is None

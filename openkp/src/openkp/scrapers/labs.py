@@ -94,7 +94,16 @@ class LabComponent(BaseModel):
     numeric_value: float | None = None  # Kaiser's parsed numeric, when available
     units: str | None = None
     reference_range: str | None = None
+    # True when Kaiser flags the value OR it falls outside the reference
+    # range. Kaiser often sends "Unknown" for values well out of range (seen
+    # live 2026-11-26 on point-of-care glucose and A1c), so its flag alone
+    # under-reports.
     is_abnormal: bool = False
+    # Kaiser's own flag as sent ("High", "Low", "Normal", "Unknown", ...).
+    abnormal_flag: str | None = None
+    # "high" or "low" when numeric_value is outside the reference range,
+    # computed by OpenKP. None when in range or not computable.
+    out_of_range: str | None = None
     comment: str | None = None         # From componentComments, HTML-stripped
 
 
@@ -495,7 +504,8 @@ def _parse_result_detail(payload: Any) -> LabResultDetail | None:
         ordering_provider=_str_or_none(metadata.get("orderProviderName")),
         authorizing_provider=_str_or_none(metadata.get("authorizingProviderName")),
         result_type=_str_or_none(metadata.get("resultType")),
-        is_abnormal=bool(first.get("isAbnormal")),
+        # Kaiser's order-level call, or any component out of range.
+        is_abnormal=bool(first.get("isAbnormal")) or any(c.is_abnormal for c in components),
         has_comment=has_comment,
         organization_id=None,  # Not in details response; list has it
         components=components,
@@ -523,10 +533,12 @@ def _parse_components(raw: Any) -> list[LabComponent]:
         comments = item.get("componentComments") or {}
 
         flag = _str_or_none(result_info.get("abnormalFlagCategoryValue"))
-        is_abnormal = flag is not None and flag.lower() not in _NON_ABNORMAL_FLAGS
+        kaiser_abnormal = flag is not None and flag.lower() not in _NON_ABNORMAL_FLAGS
 
         numeric = result_info.get("numericValue")
         numeric_value = _float_or_none(numeric)
+        out_of_range = _out_of_range(numeric_value, result_info.get("referenceRange"))
+        is_abnormal = kaiser_abnormal or out_of_range is not None
 
         comment_text = None
         comment_html = comments.get("contentAsHtml") or comments.get("contentAsString")
@@ -542,6 +554,8 @@ def _parse_components(raw: Any) -> list[LabComponent]:
                 units=_str_or_none(info.get("units")),
                 reference_range=_parse_reference_range(result_info.get("referenceRange")),
                 is_abnormal=is_abnormal,
+                abnormal_flag=flag,
+                out_of_range=out_of_range,
                 comment=comment_text,
             )
         )
@@ -576,6 +590,49 @@ def _parse_reference_range(raw: Any) -> str | None:
     if low and high:
         return f"{low} - {high}"
     return low or high or None
+
+
+_BOUND_RE = re.compile(r"^\s*(<=|>=|<|>|≤|≥)\s*(-?\d+(?:\.\d+)?)\s*$")
+_SPAN_RE = re.compile(r"^\s*(-?\d+(?:\.\d+)?)\s*-\s*(-?\d+(?:\.\d+)?)\s*$")
+
+
+def _out_of_range(value: float | None, raw_range: Any) -> str | None:
+    """"high" / "low" when `value` falls outside Kaiser's reference range.
+
+    Uses the numeric `low` / `high` bounds when Kaiser sends them (honoring
+    lowerBoundExclusive / upperBoundExclusive), otherwise parses
+    `formattedReferenceRange` forms seen live: "<=5.6", "<140", ">=60",
+    "60 - 159". Anything else (text ranges, "Negative") returns None.
+    """
+    if value is None or not isinstance(raw_range, dict):
+        return None
+    low = _float_or_none(raw_range.get("low"))
+    high = _float_or_none(raw_range.get("high"))
+    low_excl = bool(raw_range.get("lowerBoundExclusive"))
+    high_excl = bool(raw_range.get("upperBoundExclusive"))
+    if low is None and high is None:
+        text = _str_or_none(raw_range.get("formattedReferenceRange")) or ""
+        span = _SPAN_RE.match(text)
+        bound = _BOUND_RE.match(text)
+        if span:
+            low, high = float(span.group(1)), float(span.group(2))
+        elif bound:
+            op, num = bound.group(1), float(bound.group(2))
+            if op in ("<=", "≤"):
+                high = num
+            elif op == "<":
+                high, high_excl = num, True
+            elif op in (">=", "≥"):
+                low = num
+            else:
+                low, low_excl = num, True
+        else:
+            return None
+    if low is not None and (value < low or (low_excl and value == low)):
+        return "low"
+    if high is not None and (value > high or (high_excl and value == high)):
+        return "high"
+    return None
 
 
 # --- html + filename utilities ---
