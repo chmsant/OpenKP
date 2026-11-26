@@ -56,6 +56,7 @@ dev = [
 
 [project.scripts]
 openkp = "openkp.mcp_server:main"
+openkp-export-paperless = "openkp.export_paperless:main"
 
 [build-system]
 requires = ["hatchling"]

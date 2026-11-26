@@ -33,6 +33,7 @@ from typing import Any
 from bs4 import BeautifulSoup
 from pydantic import BaseModel, Field
 
+from openkp.downloads_manifest import save_download
 from openkp.safety import audit_log_event, is_dry_run
 from openkp.scrapers.csrf import fetch_csrf_token
 from openkp.scrapers.request import KaiserRequest
@@ -431,13 +432,14 @@ async def download_message_attachment(
     suffix = f".{file_extension.lower().lstrip('.')}" if file_extension else ""
     if suffix and not safe.lower().endswith(suffix):
         safe += suffix
-    out_path = out_dir / safe
-    out_path.write_bytes(body)
+    out_path = save_download(
+        out_dir, safe, body, kind="message_attachment", source_id=dcs_id, title=name_for_file
+    )
 
     return MessageAttachmentDownload(
         status="downloaded",
         path=str(out_path),
-        filename=safe,
+        filename=out_path.name,
         size_bytes=len(body),
     )
 
@@ -788,7 +790,7 @@ async def list_message_recipients(client: KaiserRequest) -> list[MessageRecipien
     payload = response.json() if response.content else {}
     recipients = _parse_recipients(payload)
     if not recipients:
-        _debug_dump_payload("recipients", payload)
+        _debug_dump_payload("recipients", payload, _client_data_dir(client))
     return recipients
 
 
@@ -814,7 +816,7 @@ async def list_message_topics(client: KaiserRequest) -> list[MessageTopic]:
     payload = response.json() if response.content else {}
     topics = _parse_topics(payload)
     if not topics:
-        _debug_dump_payload("topics", payload)
+        _debug_dump_payload("topics", payload, _client_data_dir(client))
     return topics
 
 
@@ -1554,8 +1556,14 @@ def _debug_dumps_enabled() -> bool:
     return os.getenv(DEBUG_DUMPS_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _debug_dump_payload(kind: str, payload: Any) -> None:
-    """Diagnostic: dump an unrecognized response to ~/.openkp/, opt-in only.
+def _client_data_dir(client: Any) -> Path | None:
+    """The data dir of the session behind `client`, or None if it has none."""
+    data_dir = getattr(getattr(client, "session_store", None), "data_dir", None)
+    return data_dir if isinstance(data_dir, Path) else None
+
+
+def _debug_dump_payload(kind: str, payload: Any, data_dir: Path | None) -> None:
+    """Diagnostic: dump an unrecognized response to the data dir, opt-in only.
 
     When `_parse_topics` or `_parse_recipients` returns empty, the response
     shape didn't match anything we expected. The recipients payload names the
@@ -1566,7 +1574,9 @@ def _debug_dump_payload(kind: str, payload: Any) -> None:
     Best-effort: swallows IO errors silently — diagnostics must never break
     the tool.
 
-    Output path (when enabled): ~/.openkp/debug-<kind>-<utc-timestamp>.json
+    Output path (when enabled): <data_dir>/debug-<kind>-<utc-timestamp>.json.
+    The data dir is the calling session's, so each profile keeps its own dumps.
+    With no data dir (a bare client in a script) nothing is written.
     """
     if not _debug_dumps_enabled():
         logger.warning(
@@ -1574,9 +1584,12 @@ def _debug_dump_payload(kind: str, payload: Any) -> None:
             kind, DEBUG_DUMPS_ENV,
         )
         return
+    if data_dir is None:
+        logger.warning("Debug dump for %s skipped: no data dir on this client", kind)
+        return
     try:
         import json as _json
-        target = Path.home() / ".openkp" / f"debug-{kind}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
+        target = data_dir / f"debug-{kind}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
         target.parent.mkdir(parents=True, exist_ok=True)
         with target.open("w", encoding="utf-8") as fh:
             _json.dump(payload, fh, indent=2, default=str)

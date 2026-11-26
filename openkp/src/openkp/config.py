@@ -38,6 +38,9 @@ class Config:
     password: str
     data_dir: Path
     log_level: str
+    # Optional human label for this account's process, e.g. "alex". Shown by
+    # whoami so it's obvious which kp.org account a tool family talks to.
+    profile: str = ""
     # True when OPENKP_INTERACTIVE_LOGIN is set. password is then always "".
     interactive_login: bool = False
 
@@ -83,12 +86,14 @@ def load_config() -> Config:
     data_dir.mkdir(parents=True, exist_ok=True)
 
     log_level = (os.getenv("OPENKP_LOG_LEVEL", "").strip() or "INFO").upper()
+    profile = os.getenv("OPENKP_PROFILE", "").strip()
 
     return Config(
         username=username,
         password=password,
         data_dir=data_dir,
         log_level=log_level,
+        profile=profile,
         interactive_login=interactive_login,
     )
 

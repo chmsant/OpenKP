@@ -26,6 +26,7 @@ write-tool preview/commit pattern and audit-log contract.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
@@ -83,6 +84,11 @@ def _get_session_store() -> SessionStore:
     return _session_store
 
 
+def _downloads_dir(store: SessionStore) -> Path:
+    """Downloads live under this process's data dir, so profiles stay separate."""
+    return store.data_dir / "downloads"
+
+
 @mcp.tool()
 def ping() -> str:
     """Smoke test. Returns 'pong' if the MCP server is alive."""
@@ -96,6 +102,7 @@ def whoami() -> dict:
     return {
         "username": cfg.username,
         "data_dir": str(cfg.data_dir),
+        "profile": cfg.profile,
         "login_mode": "interactive" if cfg.interactive_login else "stored",
         "version": __version__,
     }
@@ -246,7 +253,7 @@ async def download_message_attachment(
       organization_id: Cross-region attachment marker. Empty string is the
         common same-region case.
 
-    Saved under `~/.openkp/downloads/` (same directory as lab PDFs). Returns
+    Saved under `<data dir>/downloads/` (default `~/.openkp/downloads/`, same directory as lab PDFs). Returns
     a dict shaped like `MessageAttachmentDownload`, with `status` being:
       - "downloaded" — saved, `path` holds the local filesystem path.
       - "error"      — `reason` holds a short explanation.
@@ -262,6 +269,7 @@ async def download_message_attachment(
         file_extension=file_extension,
         display_name=display_name,
         organization_id=organization_id,
+        download_dir=_downloads_dir(store),
     )
     return outcome.model_dump()
 
@@ -327,7 +335,7 @@ async def download_lab_result_pdf(order_key: str) -> dict:
     Args:
       order_key: The `order_key` field from a `list_lab_results` result.
 
-    The PDF is saved under `~/.openkp/downloads/`. Returns a dict shaped like
+    The PDF is saved under `<data dir>/downloads/` (default `~/.openkp/downloads/`). Returns a dict shaped like
     the `LabPdfDownload` pydantic model, with `status` being one of:
       - "downloaded" — PDF saved, `path` holds the local filesystem path.
       - "generation_in_progress" — Kaiser is building the PDF on demand. Wait
@@ -342,7 +350,9 @@ async def download_lab_result_pdf(order_key: str) -> dict:
     """
     store = _get_session_store()
     client = KaiserRequest(store)
-    outcome = await _download_lab_result_pdf(client, order_key)
+    outcome = await _download_lab_result_pdf(
+        client, order_key, download_dir=_downloads_dir(store)
+    )
     return outcome.model_dump()
 
 
@@ -607,7 +617,7 @@ async def request_refill(medication_id: str, confirm: bool = False) -> dict:
       is present (`can_confirm=False`).
 
     Safety:
-      - Every commit-path call writes to `~/.openkp/audit.log` (JSONL) before
+      - Every commit-path call writes to `<data dir>/audit.log` (JSONL) before
         and after the Kaiser request.
       - `OPENKP_DRY_RUN=1` in the environment short-circuits the final POST and
         returns a synthetic success `OrderConfirmation` with `dry_run=True`.
@@ -743,7 +753,7 @@ async def send_message(
       blocker is present.
 
     Safety:
-      - Every commit-path call writes to `~/.openkp/audit.log` (JSONL) before
+      - Every commit-path call writes to `<data dir>/audit.log` (JSONL) before
         and after the Kaiser request. **Subject and body are NOT logged** —
         only metadata (recipient display name, topic, body length).
       - `OPENKP_DRY_RUN=1` short-circuits the actual Send POST and returns a
@@ -897,7 +907,7 @@ async def read_visit_notes(csn: str) -> dict:
 async def download_visit_avs_pdf(csn: str) -> dict:
     """Download the canonical After Visit Summary PDF for one past visit.
 
-    Saves to `~/.openkp/downloads/`. Same pattern as `download_lab_result_pdf`
+    Saves to `<data dir>/downloads/` (default `~/.openkp/downloads/`). Same pattern as `download_lab_result_pdf`
     and `download_message_attachment` — bytes are NOT returned through MCP.
 
     Args:
@@ -912,7 +922,7 @@ async def download_visit_avs_pdf(csn: str) -> dict:
     """
     store = _get_session_store()
     client = KaiserRequest(store)
-    outcome = await _download_visit_avs_pdf(client, csn)
+    outcome = await _download_visit_avs_pdf(client, csn, download_dir=_downloads_dir(store))
     return outcome.model_dump()
 
 

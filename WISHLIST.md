@@ -206,8 +206,9 @@ Known mapped BFFs live in `docs/research/endpoints/billing.md`.
 - `KP_USERNAME` env var per process picks the keyring entry.
 - Two `claude_desktop_config.json` server entries (e.g., `openkp-hugo`, `openkp-sil`) with different env blocks → two fully isolated profiles. The LLM sees them as distinct tool families (`mcp__openkp-hugo__list_messages` vs `mcp__openkp-sil__list_messages`), so cross-contamination is structurally impossible.
 
-**What's missing:**
-- README section showing the two-server config pattern with annotated env blocks.
+**Status:** README section "More than one Kaiser account on one machine" added. Building it turned up a real gap in the claim above: the three download tools and the recipients/topics debug dumps wrote to a hardcoded `~/.openkp/`, ignoring `OPENKP_DATA_DIR`. Every profile shared one downloads folder. Fixed by passing the session's data dir down from `mcp_server`. `OPENKP_PROFILE` adds a label that `whoami` reports.
+
+**Still open:**
 - Optional: namespace the keyring service as `openkp:<profile>` to make export/audit cleaner. Debatable whether this is worth the migration.
 
 **Non-goal:** Don't build a "switch profile" tool inside the MCP. Process boundaries are the right isolation primitive — anything finer-grained inside one process is more code, more risk, less elegant.
