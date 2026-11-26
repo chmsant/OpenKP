@@ -26,12 +26,16 @@ write-tool preview/commit pattern and audit-log contract.
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
+from typing import TypeVar
 
 from mcp.server.fastmcp import FastMCP
 
 from openkp import __version__
-from openkp.config import load_config
+from openkp.config import Config, load_config
 from openkp.scrapers.access_logs import fetch_access_log
 from openkp.scrapers.allergies import fetch_allergies
 from openkp.scrapers.appointments import fetch_appointments, fetch_past_visits
@@ -56,6 +60,13 @@ from openkp.scrapers.messages import (
     send_message as _send_message,
 )
 from openkp.scrapers.problems import fetch_problems
+from openkp.scrapers.proxy import (
+    ProxyContextError,
+    ProxySelector,
+    assert_still_active,
+    ensure_context,
+    fetch_proxy_subjects,
+)
 from openkp.scrapers.profile import fetch_profile
 from openkp.scrapers.refill import (
     fetch_refill_order,
@@ -75,11 +86,92 @@ mcp = FastMCP("OpenKP")
 _session_store: SessionStore | None = None
 
 
+# --- proxy (act-for) mode ---------------------------------------------------
+#
+# A profile with OPENKP_ACT_FOR_ID_SHA256 or OPENKP_ACT_FOR_NAME reads a
+# dependent's chart through the account holder's login. Not every Kaiser
+# surface follows the switch (profile and pharmacy stay on the account
+# holder), so proxy mode is deny-by-default: `_get_session_store` refuses
+# unless the calling tool opted in with `_proxy_read` (switch, verify, run,
+# re-verify) or `_allow_in_proxy` (no chart data involved). Write tools
+# never opt in.
+
+T = TypeVar("T")
+
+_proxy_allowed: ContextVar[bool] = ContextVar("openkp_proxy_allowed", default=False)
+PROXY_MARKER_FILE = "proxy-profile"
+
+PROXY_REFUSAL = (
+    "This OpenKP profile reads a dependent's chart (OPENKP_ACT_FOR_*). This tool "
+    "isn't verified to follow Kaiser's proxy switch, so it's disabled here to avoid "
+    "returning the account holder's data under the dependent's name. Use the "
+    "account holder's own profile for it."
+)
+
+
+def _selector(cfg: Config) -> ProxySelector:
+    return ProxySelector(id_sha256=cfg.act_for_id_sha256, display_name=cfg.act_for_name)
+
+
+def _check_proxy_marker(cfg: Config) -> None:
+    """Keep proxy and normal profiles from sharing a data dir (and a session)."""
+    marker = cfg.data_dir / PROXY_MARKER_FILE
+    if cfg.is_proxy:
+        if not marker.exists():
+            marker.write_text("This data dir belongs to an OpenKP proxy (act-for) profile.\n")
+    elif marker.exists():
+        raise RuntimeError(
+            f"{cfg.data_dir} belongs to a proxy (act-for) profile, but this server isn't "
+            "configured as one. Give each profile its own OPENKP_DATA_DIR."
+        )
+
+
+@contextmanager
+def _allow_in_proxy() -> Iterator[None]:
+    token = _proxy_allowed.set(True)
+    try:
+        yield
+    finally:
+        _proxy_allowed.reset(token)
+
+
+async def _proxy_read(fn: Callable[[KaiserRequest], Awaitable[T]]) -> T:
+    """Run a read that is verified to follow the proxy switch.
+
+    Normal profile: just runs it. Proxy profile: puts the session on the
+    configured dependent's chart and verifies that, runs the read, then
+    discards the result if the session re-authenticated mid-call (a re-login
+    resets the chart to the account holder) or the active chart changed.
+    """
+    cfg = load_config()
+    with _allow_in_proxy():
+        store = _get_session_store()
+        client = KaiserRequest(store)
+        if not cfg.is_proxy:
+            return await fn(client)
+        target = await ensure_context(client, _selector(cfg))
+        generation = store.generation
+        result = await fn(client)
+        if store.generation != generation:
+            raise ProxyContextError(
+                "Kaiser signed in again during the call, which resets the active chart. "
+                "The result was discarded. Try again."
+            )
+        await assert_still_active(client, target)
+        return result
+
+
 def _get_session_store() -> SessionStore:
-    """Lazy singleton. Built on first authenticated tool call, reused thereafter."""
+    """Lazy singleton. Built on first authenticated tool call, reused thereafter.
+
+    In a proxy profile this refuses unless the calling tool opted in.
+    """
     global _session_store
+    cfg = load_config()
+    if cfg.is_proxy and not _proxy_allowed.get():
+        raise RuntimeError(PROXY_REFUSAL)
+    _check_proxy_marker(cfg)
     if _session_store is None:
-        cfg = load_config()
         _session_store = SessionStore(cfg.data_dir, cfg.username, cfg.password)
     return _session_store
 
@@ -103,7 +195,42 @@ def whoami() -> dict:
         "username": cfg.username,
         "data_dir": str(cfg.data_dir),
         "profile": cfg.profile,
+        "acting_for": _selector(cfg).describe() if cfg.is_proxy else None,
         "version": __version__,
+    }
+
+
+@mcp.tool()
+async def list_proxy_targets() -> dict:
+    """List the charts this login can act for, with id fingerprints.
+
+    Use it once to set up a proxy profile for a dependent: copy the
+    dependent's `id_sha256` into that profile's OPENKP_ACT_FOR_ID_SHA256.
+    The fingerprint stays valid when Kaiser renames the chart (newborn charts
+    start with a placeholder name). Raw ids are never returned.
+
+    Read-only. It doesn't switch the active chart.
+    """
+    cfg = load_config()
+    with _allow_in_proxy():
+        client = KaiserRequest(_get_session_store())
+        subjects = await fetch_proxy_subjects(client)
+    sel = _selector(cfg)
+    return {
+        "proxy_profile": cfg.is_proxy,
+        "targets": [
+            {
+                "display_name": s.display_name,
+                "is_self": s.is_self,
+                "is_selected": s.is_selected,
+                "id_sha256": s.fingerprint,
+                "configured_target": cfg.is_proxy and (
+                    (bool(sel.id_sha256) and s.fingerprint.startswith(sel.id_sha256))
+                    or (not sel.id_sha256 and s.display_name.casefold() == sel.display_name.casefold())
+                ),
+            }
+            for s in subjects
+        ],
     }
 
 
@@ -118,7 +245,8 @@ async def session_check() -> dict:
     Returns a summary of the probe, never PHI. Use `get_profile` (when it
     lands) for actual user data.
     """
-    store = _get_session_store()
+    with _allow_in_proxy():  # a keepalive probe carries no chart data
+        store = _get_session_store()
     client = KaiserRequest(store)
 
     probe_path = "/mychartcn/keepalive.asp?cnt=1"
