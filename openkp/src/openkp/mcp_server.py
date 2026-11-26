@@ -30,7 +30,7 @@ from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from mcp.server.fastmcp import FastMCP
 
@@ -43,7 +43,6 @@ from openkp.scrapers.care_team import fetch_care_team
 from openkp.scrapers.immunizations import fetch_immunizations
 from openkp.scrapers.implants import fetch_implants
 from openkp.scrapers.visit_notes import (
-    AvsPdfDownload,
     download_visit_avs_pdf as _download_visit_avs_pdf,
     fetch_visit_notes,
 )
@@ -52,6 +51,7 @@ from openkp.scrapers.labs import (
     fetch_lab_result,
     fetch_lab_results,
 )
+from openkp.scrapers.chart_medications import fetch_chart_medications
 from openkp.scrapers.medications import fetch_medications
 from openkp.scrapers.messages import (
     download_message_attachment as _download_message_attachment,
@@ -161,6 +161,30 @@ async def _proxy_read(fn: Callable[[KaiserRequest], Awaitable[T]]) -> T:
             )
         await assert_still_active(client, target)
         return result
+
+
+async def _proxy_download(fn: Callable[[KaiserRequest], Awaitable[T]]) -> T:
+    """`_proxy_read` for tools that save a file.
+
+    If the after-read chart check fails, the file the tool just saved is
+    removed, so a download that can't be attributed to the right chart
+    doesn't stay on disk. Outcomes are expected to carry `status` and `path`.
+    """
+    saved: list[Any] = []
+
+    async def run(client: KaiserRequest) -> T:
+        outcome = await fn(client)
+        saved.append(outcome)
+        return outcome
+
+    try:
+        return await _proxy_read(run)
+    except ProxyContextError:
+        for o in saved:
+            path = getattr(o, "path", None)
+            if getattr(o, "status", None) == "downloaded" and path:
+                Path(path).unlink(missing_ok=True)
+        raise
 
 
 def _get_session_store() -> SessionStore:
@@ -329,16 +353,16 @@ async def list_messages(
 
     See `docs/research/endpoints/messages.md`.
     """
-    store = _get_session_store()
-    client = KaiserRequest(store)
-    threads = await fetch_messages(
-        client,
-        folder=folder,
-        search=search,
-        before_iso=before_iso,
-        limit=limit,
-        deep_search=deep_search,
-        max_pages=max_pages,
+    threads = await _proxy_read(
+        lambda client: fetch_messages(
+            client,
+            folder=folder,
+            search=search,
+            before_iso=before_iso,
+            limit=limit,
+            deep_search=deep_search,
+            max_pages=max_pages,
+        )
     )
     return [t.model_dump() for t in threads]
 
@@ -359,9 +383,7 @@ async def read_message(thread_id: str) -> dict | None:
 
     See `docs/research/endpoints/messages.md`.
     """
-    store = _get_session_store()
-    client = KaiserRequest(store)
-    thread = await fetch_message(client, thread_id)
+    thread = await _proxy_read(lambda client: fetch_message(client, thread_id))
     return thread.model_dump() if thread else None
 
 
@@ -391,15 +413,15 @@ async def download_message_attachment(
     The bytes are NOT returned through MCP — too big for Claude's context.
     Hand the path to a separate PDF / image reading tool, or open locally.
     """
-    store = _get_session_store()
-    client = KaiserRequest(store)
-    outcome = await _download_message_attachment(
-        client,
-        dcs_id=dcs_id,
-        file_extension=file_extension,
-        display_name=display_name,
-        organization_id=organization_id,
-        download_dir=_downloads_dir(store),
+    outcome = await _proxy_download(
+        lambda client: _download_message_attachment(
+            client,
+            dcs_id=dcs_id,
+            file_extension=file_extension,
+            display_name=display_name,
+            organization_id=organization_id,
+            download_dir=_downloads_dir(client.session_store),
+        )
     )
     return outcome.model_dump()
 
@@ -426,13 +448,13 @@ async def list_lab_results(
 
     See `docs/research/endpoints/labs.md`.
     """
-    store = _get_session_store()
-    client = KaiserRequest(store)
-    results = await fetch_lab_results(
-        client,
-        search=search,
-        limit=limit,
-        include_all_types=include_all_types,
+    results = await _proxy_read(
+        lambda client: fetch_lab_results(
+            client,
+            search=search,
+            limit=limit,
+            include_all_types=include_all_types,
+        )
     )
     return [r.model_dump() for r in results]
 
@@ -452,9 +474,7 @@ async def read_lab_result(order_key: str) -> dict | None:
     `has_pdf` tells you whether `download_lab_result_pdf` will return a file.
     Returns `None` if the order cannot be found.
     """
-    store = _get_session_store()
-    client = KaiserRequest(store)
-    result = await fetch_lab_result(client, order_key)
+    result = await _proxy_read(lambda client: fetch_lab_result(client, order_key))
     return result.model_dump() if result else None
 
 
@@ -478,10 +498,10 @@ async def download_lab_result_pdf(order_key: str) -> dict:
     the path is what you'd hand to a separate PDF-reading tool or open locally.
     The bytes are NOT returned through MCP — too big for Claude's context.
     """
-    store = _get_session_store()
-    client = KaiserRequest(store)
-    outcome = await _download_lab_result_pdf(
-        client, order_key, download_dir=_downloads_dir(store)
+    outcome = await _proxy_download(
+        lambda client: _download_lab_result_pdf(
+            client, order_key, download_dir=_downloads_dir(client.session_store)
+        )
     )
     return outcome.model_dump()
 
@@ -512,10 +532,46 @@ async def list_medications(filter: str = "all") -> dict:
     Source: Kaiser's pharmacy BFF microservices on
     `apims.kaiserpermanente.org`. This is the first OpenKP tool to use the
     BFF — see `docs/research/endpoints/medications.md`.
+
+    Not available in proxy (act-for) profiles: the pharmacy service ignores
+    Kaiser's proxy switch. Use `list_chart_medications` there.
     """
+    if load_config().is_proxy:
+        raise RuntimeError(
+            "list_medications reads Kaiser's pharmacy service, which always returns the "
+            "signed-in account's prescriptions, not the dependent's. Use "
+            "list_chart_medications in this profile."
+        )
     store = _get_session_store()
     client = KaiserRequest(store)
     response = await fetch_medications(client, filter=filter)
+    return response.model_dump()
+
+
+@mcp.tool()
+async def list_chart_medications() -> dict:
+    """List the medications on the chart, as MyChart's Medications page shows them.
+
+    Source: `/mychartcn/Clinical/Medications/LoadMedicationsPageData`. Unlike
+    `list_medications` (the pharmacy service), this follows Kaiser's proxy
+    switch, so it works in proxy (act-for) profiles too.
+
+    Returns a dict shaped like `ChartMedicationsResponse` in
+    `openkp.scrapers.chart_medications`: `medications` (each with `name`,
+    `friendly_name`, `sig`, `start_date` and `start_date_iso`, `date_kind`
+    "prescribed" or "documented", `prescription_number`, ordering and
+    authorizing provider names, `organization`, patient- or clinic-reported
+    flags, and refill state: `is_refillable`, `refills_remaining`,
+    `refill_expiration_date`, `day_supply`, `dispense_quantity`),
+    `total_count`, `is_proxy_view`, and `patient_admitted`.
+
+    Dates are Kaiser's display strings with a best-effort ISO date beside
+    each. Medicines given during a hospital stay aren't in this list.
+
+    Use `list_medications` (own profile) for pharmacy order status and
+    refill eligibility.
+    """
+    response = await _proxy_read(fetch_chart_medications)
     return response.model_dump()
 
 
@@ -1082,22 +1138,11 @@ async def download_visit_avs_pdf(csn: str) -> dict:
 
     See `docs/research/endpoints/visit_notes.md`.
     """
-    saved: list[AvsPdfDownload] = []
-
-    async def read(client: KaiserRequest) -> AvsPdfDownload:
-        outcome = await _download_visit_avs_pdf(
+    outcome = await _proxy_download(
+        lambda client: _download_visit_avs_pdf(
             client, csn, download_dir=_downloads_dir(client.session_store)
         )
-        saved.append(outcome)
-        return outcome
-
-    try:
-        outcome = await _proxy_read(read)
-    except ProxyContextError:
-        for o in saved:
-            if o.status == "downloaded" and o.path:
-                Path(o.path).unlink(missing_ok=True)
-        raise
+    )
     return outcome.model_dump()
 
 

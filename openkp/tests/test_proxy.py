@@ -15,6 +15,7 @@ import httpx
 import pytest
 
 from openkp import mcp_server
+from openkp.scrapers.visit_notes import AvsPdfDownload
 from openkp.scrapers import proxy
 from openkp.scrapers.proxy import (
     ProxyContextError,
@@ -238,14 +239,20 @@ def proxy_env(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("tool, kwargs", [
-    ("get_profile", {}), ("list_medications", {}), ("list_problems", {}), ("list_messages", {}),
+    ("get_profile", {}), ("list_problems", {}), ("list_allergies", {}),
+    ("list_message_recipients", {}), ("list_message_topics", {}),
+    ("track_refill_order", {"order_number": "1"}),
     ("request_refill", {"medication_id": "m", "confirm": True}),
     ("send_message", {"recipient_id": "r", "topic_value": "101", "subject": "s", "body": "b", "confirm": True}),
-    ("download_lab_result_pdf", {"order_key": "k"}),
 ])
 async def test_unlisted_tools_refuse_in_proxy_mode(proxy_env, tool, kwargs):
     with pytest.raises(RuntimeError, match="disabled here"):
         await getattr(mcp_server, tool)(**kwargs)
+
+
+async def test_pharmacy_medications_refuse_and_point_to_chart_list(proxy_env):
+    with pytest.raises(RuntimeError, match="list_chart_medications"):
+        await mcp_server.list_medications()
 
 
 def _wire_portal(monkeypatch, portal: FakePortal, store):
@@ -346,7 +353,7 @@ async def test_avs_download_saves_into_the_proxy_profile(proxy_env, monkeypatch)
     async def fake_download(client, csn, download_dir):
         assert client.active == "WP-kid"
         assert download_dir == proxy_env / "downloads"
-        return mcp_server.AvsPdfDownload(status="no_pdf_available")
+        return AvsPdfDownload(status="no_pdf_available")
 
     monkeypatch.setattr(mcp_server, "_download_visit_avs_pdf", fake_download)
     assert (await mcp_server.download_visit_avs_pdf("csn-1"))["status"] == "no_pdf_available"
@@ -362,7 +369,7 @@ async def test_avs_download_is_removed_when_the_chart_check_fails(proxy_env, mon
         download_dir.mkdir(parents=True, exist_ok=True)
         saved.write_bytes(b"%PDF")
         client.active = "WP-kid2"  # chart drifted during the call
-        return mcp_server.AvsPdfDownload(status="downloaded", path=str(saved))
+        return AvsPdfDownload(status="downloaded", path=str(saved))
 
     monkeypatch.setattr(mcp_server, "_download_visit_avs_pdf", fake_download)
     with pytest.raises(ProxyContextError):
@@ -433,3 +440,58 @@ def test_http_library_request_urls_are_not_logged(level, caplog):
         logging.getLogger("httpx").info("HTTP Request: GET %s", "https://x/inside.asp?eid=WP-secret")
         logging.getLogger("httpcore.http11").debug("send_request_headers eid=WP-secret")
     assert "WP-secret" not in caplog.text
+
+
+
+# --- labs, messages, chart medications (live-verified 2026-11-26) ---
+
+
+@pytest.mark.parametrize("tool, fetch_attr, kwargs, expect", [
+    ("list_lab_results", "fetch_lab_results", {}, []),
+    ("read_lab_result", "fetch_lab_result", {"order_key": "k"}, {"order_key": "k"}),
+    ("list_messages", "fetch_messages", {}, []),
+    ("read_message", "fetch_message", {"thread_id": "t"}, {"id": "t"}),
+    ("list_chart_medications", "fetch_chart_medications", {}, {"total_count": 0}),
+])
+async def test_chart_reads_are_allowed_in_proxy_mode(proxy_env, monkeypatch, tool, fetch_attr, kwargs, expect):
+    portal = FakePortal()
+    _wire_portal(monkeypatch, portal, SimpleNamespace(generation=1, data_dir=proxy_env))
+
+    async def fake_fetch(client, *a, **kw):
+        assert client.active == "WP-kid"
+        return [] if isinstance(expect, list) else _Dump(expect)
+
+    monkeypatch.setattr(mcp_server, fetch_attr, fake_fetch)
+    assert await getattr(mcp_server, tool)(**kwargs) == expect
+
+
+@pytest.mark.parametrize("tool, scraper_attr, kwargs", [
+    ("download_lab_result_pdf", "_download_lab_result_pdf", {"order_key": "k"}),
+    ("download_message_attachment", "_download_message_attachment", {"dcs_id": "d"}),
+    ("download_visit_avs_pdf", "_download_visit_avs_pdf", {"csn": "c"}),
+])
+async def test_proxy_downloads_save_in_profile_and_are_removed_on_drift(
+    proxy_env, monkeypatch, tool, scraper_attr, kwargs
+):
+    portal = FakePortal()
+    portal.session_store = SimpleNamespace(generation=1, data_dir=proxy_env)
+    _wire_portal(monkeypatch, portal, portal.session_store)
+    saved = proxy_env / "downloads" / "doc.pdf"
+    drift = {"on": False}
+
+    async def fake_download(client, *a, download_dir=None, **kw):
+        assert client.active == "WP-kid"
+        assert download_dir == proxy_env / "downloads"
+        download_dir.mkdir(parents=True, exist_ok=True)
+        saved.write_bytes(b"%PDF")
+        if drift["on"]:
+            client.active = "WP-kid2"
+        return SimpleNamespace(status="downloaded", path=str(saved), model_dump=lambda: {"status": "downloaded"})
+
+    monkeypatch.setattr(mcp_server, scraper_attr, fake_download)
+    assert (await getattr(mcp_server, tool)(**kwargs))["status"] == "downloaded"
+    assert saved.exists()
+    drift["on"] = True
+    with pytest.raises(ProxyContextError):
+        await getattr(mcp_server, tool)(**kwargs)
+    assert not saved.exists()

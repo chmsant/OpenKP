@@ -226,7 +226,7 @@ If your kp.org login has proxy access to someone else's chart (a child, for exam
 
 How it stays safe:
 
-- **Only tools confirmed to follow Kaiser's proxy switch work in a proxy profile.** Today that's `list_immunizations`, `list_past_visits`, `read_visit_notes` and `download_visit_avs_pdf`, plus `list_proxy_targets`, `session_check`, `whoami` and `ping`. Everything else refuses. Some Kaiser surfaces don't follow the switch: profile and pharmacy keep returning the account holder's data. A tool on that list would hand you your own medications labeled as your child's.
+- **Only tools confirmed to follow Kaiser's proxy switch work in a proxy profile.** Today that's labs (`list_lab_results`, `read_lab_result`, `download_lab_result_pdf`), messages (`list_messages`, `read_message`, `download_message_attachment`), `list_chart_medications`, `list_immunizations`, and visits (`list_past_visits`, `read_visit_notes`, `download_visit_avs_pdf`), plus `list_proxy_targets`, `session_check`, `whoami` and `ping`. Everything else refuses. Some Kaiser surfaces don't follow the switch: profile and pharmacy keep returning the account holder's data. For medications in a proxy profile, use `list_chart_medications`. Sending messages and refills stay off. A tool on that list would hand you your own medications labeled as your child's.
 - **No writes.** Refills and messages refuse in a proxy profile.
 - **Every read is checked twice.** Before the read, OpenKP confirms Kaiser reports the dependent's chart as active, switching if needed. After the read, it confirms again. If the session silently signed in again during the call, which resets Kaiser to your own chart, the result is thrown away.
 - A proxy profile marks its data dir, and a normal profile refuses to use that dir.
@@ -275,6 +275,7 @@ For write operations:
 | `read_lab_result` | One result with components, values, reference ranges, abnormal flags, narrative. |
 | `download_lab_result_pdf` | Saves the kp.org-generated PDF to disk. Surfaces `generation_in_progress` for lazy-built PDFs. |
 | `list_medications` | Active and recent prescriptions with dose, prescriber, refills, copay, mailable / auto-refill flags. |
+| `list_chart_medications` | The medication list MyChart's Medications page shows: name, instructions, start date, prescriber, refills remaining. Works in proxy profiles, where `list_medications` can't. |
 | `list_problems` | Active diagnoses (name + date noted). Kaiser intentionally hides ICD codes from patients. |
 | `list_allergies` | Allergy list. Handles "no known allergies" as a first-class state. |
 | `list_appointments` | Upcoming + in-progress visits. |
