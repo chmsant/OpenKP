@@ -85,7 +85,7 @@ The menu and `proxySubjects` exist only in the rendered page. A `fetch` of `/myc
 
 - **Selector:** `OPENKP_ACT_FOR_ID_SHA256` (16 to 64 hex chars, a prefix of `sha256(Id)`) or `OPENKP_ACT_FOR_NAME` (exact, case-insensitive). Zero matches, multiple matches, or a match on the self entry are all errors.
 - **Switch:** follow `LinkUrl` only if it is `https://healthy.kaiserpermanente.org/mychartcn/inside.asp` with `mode=proxyswitch&action=switchcontext`. Redirects are followed only on that host.
-- **Deny by default:** in a proxy profile, `_get_session_store` refuses unless the tool opted in. `list_immunizations`, `list_past_visits`, `read_visit_notes` and `download_visit_avs_pdf` opt in through `_proxy_read`. `session_check` and `list_proxy_targets` opt in without touching chart data.
+- **Deny by default:** in a proxy profile, `_get_session_store` refuses unless the tool opted in. Labs, messages (read only), `list_chart_medications`, `list_immunizations` and the visit tools opt in through `_proxy_read`. The three download tools use `_proxy_download`, which also removes the saved file if the after-read check fails. `session_check` and `list_proxy_targets` opt in without touching chart data.
 - **`_proxy_read`:** `ensure_context` (switch if needed, then verify `IsSelected`), record `SessionStore.generation`, run the read, discard the result if the generation changed (a silent re-login resets the chart), then re-verify `IsSelected`.
 - A `proxy-profile` marker in the data dir stops a normal profile from reusing a proxy profile's session.
 - Tests break each of the three safeguards on purpose to prove the suite notices. A conftest fixture blocks real browser launches in every test.
@@ -97,3 +97,11 @@ To allow another tool in proxy mode: check live that its endpoint follows the sw
 - `/mychartcn/Visits/VisitsList/LoadPast` follows the switch. As the account holder it returned the holder's visits, as the dependent one visit, with no overlap between the two lists (visit ids compared as hashes).
 - Visit ids are scoped to the active chart. With the dependent active, `GetVisitDetailsPast` for one of the holder's visit ids returned HTTP 500, so `read_visit_notes` and `download_visit_avs_pdf` can't return another chart's documents under the dependent's name. Nothing was read and no file was written.
 - `download_visit_avs_pdf` removes its saved file if the after-read chart check fails.
+
+### Labs, messages and medications in proxy context (live 2026-11-26)
+
+Checked with ids compared as hashes, never printed.
+
+- **Labs** (`/mychartcn/api/test-results/*`) follow the switch. Holder, newborn and adult-dependent lists were disjoint. With one chart active, another chart's order key gets nothing back from `GetDetails` and an HTTP error from the PDF chain. No file was written.
+- **Messages** (`/mychartcn/api/conversations/*`) follow the switch. An adult dependent's 50 threads didn't overlap the holder's 13. Another chart's thread id returns nothing. An attachment id from one dependent fails to download while another dependent is active, and downloads on its own chart (positive control, file discarded). Send, recipients and topics stay blocked: writes are out of scope for proxy profiles.
+- **Medications.** The pharmacy BFF on apims ignores the switch, so `list_medications` refuses in proxy profiles and points to `list_chart_medications`. That one reads `POST /mychartcn/Clinical/Medications/LoadMedicationsPageData`, which follows it: `IsProxyView` turns true, `ShowPatientAdmittedBanner` matched the dependent's admission, and the prescription list changed with the chart. See `chart_medications.md`.
