@@ -50,7 +50,7 @@ class FakePortal:
             {"Id": i, "DisplayName": n, "IsSelf": s, "IsSelected": i == self.active, "LinkUrl": "#" if i == self.active else _link(i)}
             for i, n, s in self.charts]}
 
-    async def get(self, url, params=None, headers=None):
+    async def get(self, url, params=None, headers=None, extra_cookies=None):
         self.calls.append(url)
         req = httpx.Request("GET", url if url.startswith("http") else KP + url)
         if url.endswith("/mychartcn/ProxySwitch"):
@@ -60,8 +60,20 @@ class FakePortal:
         if parsed.path == "/mychartcn/inside.asp":
             if self.redirect_to:
                 return httpx.Response(302, headers={"Location": self.redirect_to}, request=req)
-            if self.honor_switch:
-                self.active = "WP-self" if q.get("mode") == ["self"] else q["eid"][0]
+            if q.get("mode") == ["self"]:
+                if self.honor_switch:
+                    self.active = "WP-self"
+                return httpx.Response(302, headers={"Location": "/mychartcn/Home"}, request=req)
+            # Live shape (2026-11-26): inside.asp sets a proxy-context cookie
+            # and HandleRedirect applies the switch only if it gets it back.
+            return httpx.Response(302, request=req, headers=[
+                ("Location", "/mychartcn/Home/HandleRedirect"),
+                ("Set-Cookie", f"ProxyRelationshipID={q['eid'][0]}; Path=/mychartcn"),
+            ])
+        if parsed.path == "/mychartcn/Home/HandleRedirect":
+            eid = (extra_cookies or httpx.Cookies()).get("ProxyRelationshipID")
+            if self.honor_switch and eid:
+                self.active = eid
             return httpx.Response(302, headers={"Location": "/mychartcn/Home"}, request=req)
         if parsed.path == "/mychartcn/Home":
             return httpx.Response(200, text="home", request=req)
@@ -332,3 +344,18 @@ def test_bad_fingerprint_config_is_rejected(proxy_env, monkeypatch):
     monkeypatch.setenv("OPENKP_ACT_FOR_ID_SHA256", "not-hex")
     with pytest.raises(RuntimeError, match="16 to 64 hex"):
         mcp_server.whoami()
+
+
+# --- KaiserRequest carries hop cookies on top of the session's ---
+
+
+def test_request_jar_adds_extra_cookies_on_top_of_session_cookies():
+    from openkp.scrapers.request import _jar
+
+    session = [{"name": "S", "value": "sess", "domain": ".kaiserpermanente.org", "path": "/"}]
+    extra = httpx.Cookies()
+    extra.set("ProxyRelationshipID", "hop", domain="healthy.kaiserpermanente.org", path="/mychartcn")
+    jar = _jar(session, extra)
+    names = {c.name: c.value for c in jar.jar}
+    assert names == {"S": "sess", "ProxyRelationshipID": "hop"}
+    assert {c.name for c in _jar(session, None).jar} == {"S"}

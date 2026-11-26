@@ -25,6 +25,8 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import parse_qs, urljoin, urlparse
 
+import httpx
+
 from openkp.scrapers.request import KaiserRequest
 
 logger = logging.getLogger(__name__)
@@ -156,9 +158,18 @@ def _validated_switch_url(link_url: str, eid: str) -> str:
 
 
 async def _get_following_same_host(client: KaiserRequest, url: str) -> int:
-    """GET and follow up to MAX_REDIRECTS redirects, only on Kaiser's host."""
+    """GET and follow up to MAX_REDIRECTS redirects, only on Kaiser's host.
+
+    Cookies set by each hop ride along to the next, like a browser. The
+    switch needs this (live 2026-11-26): inside.asp sets proxy-context
+    cookies and /mychartcn/Home/HandleRedirect only applies the switch when
+    it gets them back. These hop cookies are not persisted.
+    """
+    hop_cookies = httpx.Cookies()
     for _ in range(MAX_REDIRECTS + 1):
-        response = await client.get(url)
+        response = await client.get(url, extra_cookies=hop_cookies)
+        for c in response.cookies.jar:
+            hop_cookies.jar.set_cookie(c)
         if response.status_code not in (301, 302, 303, 307, 308):
             return response.status_code
         nxt = urlparse(urljoin(url, response.headers.get("Location", "")))
