@@ -36,6 +36,7 @@ from openkp.scrapers.access_logs import fetch_access_log
 from openkp.scrapers.allergies import fetch_allergies
 from openkp.scrapers.appointments import fetch_appointments, fetch_past_visits
 from openkp.scrapers.care_team import fetch_care_team
+from openkp.scrapers.immunizations import fetch_immunizations
 from openkp.scrapers.implants import fetch_implants
 from openkp.scrapers.visit_notes import (
     download_visit_avs_pdf as _download_visit_avs_pdf,
@@ -412,6 +413,25 @@ async def list_problems() -> dict:
     store = _get_session_store()
     client = KaiserRequest(store)
     response = await fetch_problems(client)
+    return response.model_dump()
+
+
+@mcp.tool()
+async def list_immunizations() -> dict:
+    """List vaccines recorded on the chart, grouped by source organization.
+
+    Returns a dict shaped like `ImmunizationsResponse` in
+    `openkp.scrapers.immunizations`: `immunizations` (each with `id`, `name`,
+    `administered_dates` as Kaiser's display strings, `administered_dates_iso`
+    as a best-effort parse that may be null, `organization_name`),
+    `organizations` (with per-org `count` and `as_of`), and `total_count`.
+
+    An empty list is valid. Kaiser reports state as-is, no guideline math.
+    See `docs/research/endpoints/immunizations.md`.
+    """
+    store = _get_session_store()
+    client = KaiserRequest(store)
+    response = await fetch_immunizations(client)
     return response.model_dump()
 
 
@@ -927,7 +947,6 @@ async def download_visit_avs_pdf(csn: str) -> dict:
 
 
 # --- TODO: remaining Phase 2 read tools ----------------------------------------
-# - list_immunizations()
 #
 # Phase 3 writes:
 #   request_refill           ✅ shipped 2026-04-25 — mail-only, see refill.md
