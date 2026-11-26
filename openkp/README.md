@@ -151,6 +151,45 @@ claude mcp add --scope user openkp -e OPENKP_DRY_RUN=1 -- /Users/<YOUR_USERNAME>
 
 Start a new `claude` session, run `/mcp` to confirm `openkp` is connected, then ask Claude to use openkp's `session_check` tool. The first call opens the same Chromium login window as above. Claude Code and Claude Desktop can share one install. They both use the session saved under `~/.openkp/`.
 
+### More than one Kaiser account on one machine
+
+Run one OpenKP server per kp.org account. Each one gets its own data directory, so its session, browser profile, audit log, downloads, and debug dumps never mix with another account's. Claude sees each server as a separate set of tools (`openkp-alex` vs `openkp-sam`), so it can't call one account's tools against the other's session.
+
+Store each password in the keyring under its own username (step 2), then give each server its own env block:
+
+```json
+{
+  "mcpServers": {
+    "openkp-alex": {
+      "command": "/Users/<YOUR_USERNAME>/OpenKP/openkp/.venv/bin/openkp",
+      "env": {
+        "KP_USERNAME": "alex@example.com",
+        "OPENKP_DATA_DIR": "/Users/<YOUR_USERNAME>/.openkp-alex",
+        "OPENKP_PROFILE": "alex"
+      }
+    },
+    "openkp-sam": {
+      "command": "/Users/<YOUR_USERNAME>/OpenKP/openkp/.venv/bin/openkp",
+      "env": {
+        "KP_USERNAME": "sam@example.com",
+        "OPENKP_DATA_DIR": "/Users/<YOUR_USERNAME>/.openkp-sam",
+        "OPENKP_PROFILE": "sam"
+      }
+    }
+  }
+}
+```
+
+`OPENKP_PROFILE` is just a label. `whoami` reports it so you can confirm which account a server is using. Each server's first `session_check` opens its own login window. Sign in as that account.
+
+Values in the `env` block take precedence over anything in `openkp/.env`, but only for the keys the block sets. Every other key in `.env` reaches every profile. So when you run more than one profile, keep per-person settings out of `.env`:
+
+- `KP_USERNAME` and `OPENKP_DATA_DIR`
+- `KP_PASSWORD`. Left in `.env`, it gets typed into every profile's sign-in, including the other person's. Store each password in the keyring instead.
+- `OPENKP_INTERACTIVE_LOGIN`, if only some profiles use it
+
+Put them in each server's `env` block. `.env` is fine for settings everyone shares, like `OPENKP_LOG_LEVEL`.
+
 ## First things to try
 
 Once `session_check` returns `status: alive`, try these prompts in Claude Desktop. Lead with the questions that show what OpenKP makes possible — surface insight your patient portal isn't built to give you:

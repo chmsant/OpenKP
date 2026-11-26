@@ -2060,22 +2060,44 @@ def test_debug_dump_disabled_by_default(monkeypatch, tmp_path: Path):
     from openkp.scrapers import messages as messages_mod
 
     monkeypatch.delenv("OPENKP_DEBUG_DUMPS", raising=False)
-    monkeypatch.setattr(messages_mod.Path, "home", classmethod(lambda cls: tmp_path))
 
-    messages_mod._debug_dump_payload("recipients", {"unexpected": "shape"})
+    messages_mod._debug_dump_payload("recipients", {"unexpected": "shape"}, tmp_path)
 
-    debug_dir = tmp_path / ".openkp"
-    assert not debug_dir.exists() or not list(debug_dir.glob("debug-*.json"))
+    assert not list(tmp_path.glob("debug-*.json"))
 
 
 def test_debug_dump_writes_when_env_set(monkeypatch, tmp_path: Path):
-    """With OPENKP_DEBUG_DUMPS=1, the raw payload lands in ~/.openkp/."""
+    """With OPENKP_DEBUG_DUMPS=1, the raw payload lands in the given data dir."""
+    from openkp.scrapers import messages as messages_mod
+
+    monkeypatch.setenv("OPENKP_DEBUG_DUMPS", "1")
+
+    messages_mod._debug_dump_payload("recipients", {"unexpected": "shape"}, tmp_path)
+
+    dumps = list(tmp_path.glob("debug-recipients-*.json"))
+    assert len(dumps) == 1
+
+
+def test_debug_dump_skipped_without_data_dir(monkeypatch, tmp_path: Path):
+    """A client with no session data dir must not fall back to the real home dir."""
     from openkp.scrapers import messages as messages_mod
 
     monkeypatch.setenv("OPENKP_DEBUG_DUMPS", "1")
     monkeypatch.setattr(messages_mod.Path, "home", classmethod(lambda cls: tmp_path))
 
-    messages_mod._debug_dump_payload("recipients", {"unexpected": "shape"})
+    messages_mod._debug_dump_payload("recipients", {"unexpected": "shape"}, None)
 
-    dumps = list((tmp_path / ".openkp").glob("debug-recipients-*.json"))
-    assert len(dumps) == 1
+    assert not list(tmp_path.rglob("debug-*.json"))
+
+
+def test_client_data_dir_reads_session_store():
+    from openkp.scrapers import messages as messages_mod
+
+    class _Store:
+        data_dir = Path("/tmp/openkp-profile-x")
+
+    class _Client:
+        session_store = _Store()
+
+    assert messages_mod._client_data_dir(_Client()) == Path("/tmp/openkp-profile-x")
+    assert messages_mod._client_data_dir(object()) is None
