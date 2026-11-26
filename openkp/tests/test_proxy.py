@@ -359,3 +359,19 @@ def test_request_jar_adds_extra_cookies_on_top_of_session_cookies():
     names = {c.name: c.value for c in jar.jar}
     assert names == {"S": "sess", "ProxyRelationshipID": "hop"}
     assert {c.name for c in _jar(session, None).jar} == {"S"}
+
+
+# --- request URLs (which can carry a dependent's eid) stay out of the logs ---
+
+
+@pytest.mark.parametrize("level", ["INFO", "DEBUG"])
+def test_http_library_request_urls_are_not_logged(level, caplog):
+    import logging
+
+    from openkp import mcp_server
+
+    mcp_server._configure_logging(level)
+    with caplog.at_level(logging.DEBUG):
+        logging.getLogger("httpx").info("HTTP Request: GET %s", "https://x/inside.asp?eid=WP-secret")
+        logging.getLogger("httpcore.http11").debug("send_request_headers eid=WP-secret")
+    assert "WP-secret" not in caplog.text

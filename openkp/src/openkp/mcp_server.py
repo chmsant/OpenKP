@@ -1087,13 +1087,25 @@ async def download_visit_avs_pdf(csn: str) -> dict:
 # ---------------------------------------------------------------------------------
 
 
+# httpx logs every request URL at INFO. Some URLs carry identifiers, such as
+# the proxy switch's eid (a dependent's internal Kaiser id), so keep the HTTP
+# libraries at WARNING whatever OPENKP_LOG_LEVEL says.
+QUIET_LOGGERS = ("httpx", "httpcore")
+
+
+def _configure_logging(level: str) -> None:
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+    for name in QUIET_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+
 def main() -> None:
     """CLI entry point. Called by the `openkp` script defined in pyproject.toml."""
     cfg = load_config()
-    logging.basicConfig(
-        level=cfg.log_level,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
+    _configure_logging(cfg.log_level)
     logger.info("OpenKP %s starting MCP server (stdio)", __version__)
     mcp.run()
 
