@@ -1,0 +1,414 @@
+"""Paperless exporter. No live Paperless here.
+
+The upload request shape matches a client already in use against a live
+instance. The /api/tasks/ and paginated list response shapes below come
+from the Paperless-NGX REST API docs and are NOT verified live from this
+code. Treat a green run as "the logic is right given those shapes".
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import httpx
+import pytest
+
+from openkp import export_paperless as ep
+from openkp.downloads_manifest import MANIFEST_FILENAME, record_download
+
+TOKEN = "tok-not-real"
+
+
+class FakePaperless:
+    """httpx MockTransport handler with doc-shaped responses (unverified)."""
+
+    def __init__(self, task_status: str = "SUCCESS", task_result: str = "Success"):
+        self.uploads: list[httpx.Request] = []
+        self.requests: list[httpx.Request] = []
+        self.task_status = task_status
+        self.task_result = task_result
+        self.names = {
+            "tags": {"medical": 7, "kaiser": 8},
+            "correspondents": {"kaiser permanente": 3},
+            "document_types": {"lab result": 5},
+        }
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        assert request.headers["Authorization"] == f"Token {TOKEN}"
+        path = request.url.path
+        if path == "/api/documents/post_document/":
+            self.uploads.append(request)
+            return httpx.Response(200, text=json.dumps(f"task-{len(self.uploads)}"))
+        if path == "/api/tasks/":
+            return httpx.Response(200, json=[{
+                "task_id": request.url.params["task_id"],
+                "status": self.task_status,
+                "result": self.task_result,
+                "related_document": "101" if self.task_status == "SUCCESS" else None,
+            }])
+        for endpoint, table in self.names.items():
+            if path == f"/api/{endpoint}/":
+                name = request.url.params["name__iexact"].lower()
+                results = [{"id": table[name], "name": name}] if name in table else []
+                return httpx.Response(200, json={"count": len(results), "results": results})
+        return httpx.Response(404)
+
+
+@pytest.fixture
+def data_dir(tmp_path: Path, monkeypatch) -> Path:
+    monkeypatch.setenv("PAPERLESS_URL", "https://paperless.test")
+    monkeypatch.setenv("PAPERLESS_TOKEN", TOKEN)
+    downloads = tmp_path / "downloads"
+    downloads.mkdir()
+    return tmp_path
+
+
+def _add(
+    data_dir: Path, name: str, content: bytes, title: str = "", kind: str = "lab_pdf",
+    source_id: str = "",
+) -> Path:
+    path = data_dir / "downloads" / name
+    path.write_bytes(content)
+    if title:
+        record_download(path, kind=kind, source_id=source_id or f"src-{name}", title=title)
+    return path
+
+
+def _run(data_dir: Path, fake: FakePaperless, *extra: str) -> int:
+    args = ep.build_parser().parse_args(["--data-dir", str(data_dir), "--wait", "0", *extra])
+    return ep.run(args, transport=httpx.MockTransport(fake))
+
+
+def _state(data_dir: Path) -> dict:
+    return json.loads((data_dir / ep.STATE_FILENAME).read_text())
+
+
+def test_manifest_records_sha_and_title(tmp_path: Path):
+    path = tmp_path / "a.pdf"
+    path.write_bytes(b"pdf")
+    record_download(path, kind="lab_pdf", source_id="k1", title="CBC panel")
+    line = json.loads((tmp_path / MANIFEST_FILENAME).read_text())
+    assert line["title"] == "CBC panel"
+    assert line["size_bytes"] == 3
+    assert len(line["sha256"]) == 64
+
+
+def test_candidates_skip_manifest_dotfiles_partials_and_empty(data_dir: Path):
+    _add(data_dir, "good.pdf", b"1", title="Good one")
+    _add(data_dir, ".hidden.pdf", b"2")
+    _add(data_dir, "partial.pdf.part", b"3")
+    _add(data_dir, "empty.pdf", b"")
+    names = [c.path.name for c in ep.find_candidates(data_dir / "downloads", None)]
+    assert names == ["good.pdf"]
+
+
+def test_title_falls_back_to_filename(data_dir: Path):
+    _add(data_dir, "Visit Summary.pdf", b"1")
+    assert ep.find_candidates(data_dir / "downloads", None) == []  # not in the manifest
+    (c,) = ep.find_candidates(data_dir / "downloads", None, include_unlisted=True)
+    assert c.title == "Visit Summary"
+    assert c.kind == "unknown"
+
+
+def test_dry_run_without_credentials_makes_no_requests(data_dir: Path, monkeypatch, capsys):
+    monkeypatch.delenv("PAPERLESS_TOKEN")
+    _add(data_dir, "a.pdf", b"1", title="A")
+    fake = FakePaperless()
+    assert _run(data_dir, fake, "--dry-run") == 0
+    assert fake.requests == []
+    out = capsys.readouterr().out
+    assert "a.pdf" not in out  # names are PHI-bearing, hidden by default
+    assert "[lab_pdf]" in out
+    assert _run(data_dir, fake, "--dry-run", "--show-names") == 0
+    assert "a.pdf" in capsys.readouterr().out
+    assert not (data_dir / ep.STATE_FILENAME).exists()
+
+
+def test_dry_run_with_credentials_resolves_names_but_never_posts(data_dir: Path):
+    _add(data_dir, "a.pdf", b"1", title="A")
+    fake = FakePaperless()
+    assert _run(data_dir, fake, "--dry-run", "--tag", "Medical") == 0
+    assert fake.uploads == []
+    assert all(r.method == "GET" for r in fake.requests)
+
+
+def test_upload_sends_metadata_and_marks_done(data_dir: Path):
+    _add(data_dir, "a.pdf", b"1", title="CBC panel")
+    fake = FakePaperless()
+    code = _run(data_dir, fake, "--tag", "Medical", "--tag", "Kaiser",
+                "--correspondent", "Kaiser Permanente", "--document-type", "Lab Result")
+    assert code == 0
+    (req,) = fake.uploads
+    body = req.content
+    assert b'name="title"\r\n\r\nCBC panel' in body
+    assert body.count(b'name="tags"') == 2
+    assert b'name="correspondent"\r\n\r\n3' in body
+    assert b'name="document_type"\r\n\r\n5' in body
+    assert b'filename="a.pdf"' in body
+    (entry,) = _state(data_dir).values()
+    assert entry["status"] == "done"
+    assert entry["document_id"] == 101
+
+
+def test_second_run_skips_already_exported(data_dir: Path):
+    _add(data_dir, "a.pdf", b"1", title="A")
+    _run(data_dir, FakePaperless())
+    fake2 = FakePaperless()
+    assert _run(data_dir, fake2) == 0
+    assert fake2.uploads == []
+
+
+def test_same_bytes_under_two_names_uploads_once(data_dir: Path):
+    _add(data_dir, "a.pdf", b"same", title="A")
+    _add(data_dir, "a (1).pdf", b"same", title="A copy")
+    fake = FakePaperless()
+    _run(data_dir, fake)
+    assert len(fake.uploads) == 1
+    assert len(_state(data_dir)) == 1
+
+
+def test_pending_task_stays_pending_then_finishes_next_run(data_dir: Path):
+    _add(data_dir, "a.pdf", b"1", title="A")
+    _run(data_dir, FakePaperless(task_status="STARTED"))
+    (entry,) = _state(data_dir).values()
+    assert entry["status"] == "pending"
+    fake = FakePaperless(task_status="SUCCESS")
+    _run(data_dir, fake)
+    assert fake.uploads == []  # not re-uploaded
+    (entry,) = _state(data_dir).values()
+    assert entry["status"] == "done"
+
+
+def test_duplicate_rejection_is_recorded_not_failed(data_dir: Path):
+    _add(data_dir, "a.pdf", b"1", title="A")
+    code = _run(data_dir, FakePaperless(task_status="FAILURE",
+                                        task_result="Not consuming a.pdf: It is a duplicate of x"))
+    (entry,) = _state(data_dir).values()
+    assert entry["status"] == "duplicate"
+    assert code == 0
+
+
+def test_consume_failure_sets_exit_code_and_retry_flag_resends(data_dir: Path):
+    _add(data_dir, "a.pdf", b"1", title="A")
+    assert _run(data_dir, FakePaperless(task_status="FAILURE", task_result="boom")) == 1
+    skip = FakePaperless()
+    _run(data_dir, skip)
+    assert skip.uploads == []  # failed files aren't retried by default
+    retry = FakePaperless()
+    assert _run(data_dir, retry, "--retry-failed") == 0
+    assert len(retry.uploads) == 1
+
+
+def test_unknown_tag_is_a_usage_error_and_uploads_nothing(data_dir: Path):
+    _add(data_dir, "a.pdf", b"1", title="A")
+    fake = FakePaperless()
+    with pytest.raises(ep.UsageError, match="matched 0"):
+        _run(data_dir, fake, "--tag", "Nope")
+    assert fake.uploads == []
+
+
+def test_http_error_body_is_never_printed(data_dir: Path, capsys):
+    _add(data_dir, "a.pdf", b"1", title="Secret title")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, text="Secret title is invalid")
+
+    args = ep.build_parser().parse_args(["--data-dir", str(data_dir), "--wait", "0"])
+    assert ep.run(args, transport=httpx.MockTransport(handler)) == 1
+    err = capsys.readouterr().err
+    assert "HTTP 400" in err
+    assert "invalid" not in err
+    assert TOKEN not in err
+
+
+def test_redirect_is_refused_not_followed(data_dir: Path):
+    _add(data_dir, "a.pdf", b"1", title="A")
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return httpx.Response(302, headers={"Location": "https://evil.test/steal"})
+
+    args = ep.build_parser().parse_args(["--data-dir", str(data_dir), "--wait", "0"])
+    assert ep.run(args, transport=httpx.MockTransport(handler)) == 1
+    assert all("evil.test" not in u for u in seen)
+
+
+def test_missing_credentials_is_usage_error(data_dir: Path, monkeypatch):
+    monkeypatch.delenv("PAPERLESS_URL")
+    assert ep.main(["--data-dir", str(data_dir)]) == ep.EXIT_USAGE
+
+
+def test_plain_http_is_refused_without_flag(data_dir: Path, monkeypatch):
+    monkeypatch.setenv("PAPERLESS_URL", "http://paperless.test")
+    _add(data_dir, "a.pdf", b"1", title="A")
+    fake = FakePaperless()
+    with pytest.raises(ep.UsageError, match="plain http"):
+        _run(data_dir, fake)
+    assert fake.requests == []
+
+
+def test_plain_http_allowed_with_flag_warns(data_dir: Path, monkeypatch, capsys):
+    monkeypatch.setenv("PAPERLESS_URL", "http://paperless.test")
+    _run(data_dir, FakePaperless(), "--allow-insecure-http")
+    assert "plain http" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("host", ["localhost", "127.0.0.1", "[::1]"])
+def test_plain_http_to_loopback_is_fine(data_dir: Path, monkeypatch, host):
+    monkeypatch.setenv("PAPERLESS_URL", f"http://{host}:8000")
+    assert _run(data_dir, FakePaperless()) == 0
+
+
+def test_symlinks_and_tampered_files_are_skipped(data_dir: Path, tmp_path: Path):
+    outside = tmp_path / "outside-secret.txt"
+    outside.write_text("not a kaiser file")
+    (data_dir / "downloads" / "link.pdf").symlink_to(outside)
+    tampered = _add(data_dir, "t.pdf", b"original", title="T")
+    tampered.write_bytes(b"changed after download")
+    assert ep.find_candidates(data_dir / "downloads", None) == []
+    names = [c.path.name for c in ep.find_candidates(data_dir / "downloads", None, include_unlisted=True)]
+    assert names == ["t.pdf"]  # unlisted mode still never follows symlinks
+
+
+def test_unknown_pending_task_is_retried_after_ttl(data_dir: Path):
+    _add(data_dir, "a.pdf", b"1", title="A")
+    _run(data_dir, FakePaperless(task_status="STARTED"))
+    state = _state(data_dir)
+    (sha,) = state
+    state[sha]["updated_at"] = "2000-01-01T00:00:00+00:00"
+    (data_dir / ep.STATE_FILENAME).write_text(json.dumps(state))
+
+    class Forgetful(FakePaperless):
+        def __call__(self, request):
+            if request.url.path == "/api/tasks/":
+                self.requests.append(request)
+                return httpx.Response(200, json=[])
+            return super().__call__(request)
+
+    _run(data_dir, Forgetful())
+    assert _state(data_dir)[sha]["status"] == "retry"
+    again = FakePaperless()
+    _run(data_dir, again)
+    assert len(again.uploads) == 1
+
+
+def test_fresh_unknown_pending_task_stays_pending(data_dir: Path):
+    _add(data_dir, "a.pdf", b"1", title="A")
+
+    class Forgetful(FakePaperless):
+        def __call__(self, request):
+            if request.url.path == "/api/tasks/":
+                return httpx.Response(200, json=[])
+            return super().__call__(request)
+
+    _run(data_dir, Forgetful())
+    (entry,) = _state(data_dir).values()
+    assert entry["status"] == "pending"
+
+
+def test_bad_since_is_a_clean_usage_error(data_dir: Path):
+    with pytest.raises(SystemExit) as exc:
+        ep.main(["--data-dir", str(data_dir), "--since", "yesterday"])
+    assert exc.value.code == 2
+
+
+def test_html_error_page_is_reported_without_content(data_dir: Path, monkeypatch, capsys):
+    _add(data_dir, "a.pdf", b"1", title="A")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<html>Secret title login page</html>")
+
+    real_init = ep.Paperless.__init__
+
+    def patched(self, base_url, token, transport=None):
+        real_init(self, base_url, token, transport=httpx.MockTransport(handler))
+
+    monkeypatch.setattr(ep.Paperless, "__init__", patched)
+    assert ep.main(["--data-dir", str(data_dir), "--wait", "0", "--tag", "Medical"]) == ep.EXIT_FAILURES
+    err = capsys.readouterr().err
+    assert "unexpected response" in err
+    assert "Secret" not in err
+
+
+
+@pytest.mark.parametrize("raw, expected", [('"abc-123"', "abc-123"), ("abc-123", "abc-123"),
+                                           ('{"task_id": "t9"}', "t9")])
+def test_parse_task_id(raw, expected):
+    assert ep._parse_task_id(raw) == expected
+
+
+def test_state_file_is_owner_only(data_dir: Path):
+    _add(data_dir, "a.pdf", b"1", title="A")
+    _run(data_dir, FakePaperless())
+    mode = (data_dir / ep.STATE_FILENAME).stat().st_mode & 0o777
+    assert mode == 0o600
+
+
+# --- re-downloads, cancelled tasks, .env (from code review) ---
+
+
+def test_redownload_of_exported_document_is_skipped(data_dir: Path, capsys):
+    _add(data_dir, "CBC.pdf", b"v1", title="CBC", source_id="order-1")
+    _run(data_dir, FakePaperless())
+    # Kaiser regenerated the PDF: same document, different bytes.
+    _add(data_dir, "CBC.pdf", b"v2", title="CBC", source_id="order-1")
+    fake = FakePaperless()
+    assert _run(data_dir, fake) == 0
+    assert fake.uploads == []
+    assert "Skipping 1 re-downloaded" in capsys.readouterr().out
+    opt_in = FakePaperless()
+    _run(data_dir, opt_in, "--include-updated")
+    assert len(opt_in.uploads) == 1
+
+
+def test_different_documents_with_one_kind_all_upload(data_dir: Path):
+    _add(data_dir, "a.pdf", b"1", title="A", source_id="order-1")
+    _add(data_dir, "b.pdf", b"2", title="B", source_id="order-2")
+    fake = FakePaperless()
+    _run(data_dir, fake)
+    assert len(fake.uploads) == 2
+
+
+def test_revoked_task_is_failed_not_pending(data_dir: Path):
+    _add(data_dir, "a.pdf", b"1", title="A")
+    assert _run(data_dir, FakePaperless(task_status="REVOKED", task_result="")) == 1
+    (entry,) = _state(data_dir).values()
+    assert entry["status"] == "failed"
+
+
+def test_task_stuck_in_retry_is_resent_after_ttl(data_dir: Path):
+    _add(data_dir, "a.pdf", b"1", title="A")
+    _run(data_dir, FakePaperless(task_status="RETRY"))
+    state = _state(data_dir)
+    (sha,) = state
+    assert state[sha]["status"] == "pending"
+    state[sha]["updated_at"] = "2000-01-01T00:00:00+00:00"
+    (data_dir / ep.STATE_FILENAME).write_text(json.dumps(state))
+    _run(data_dir, FakePaperless(task_status="RETRY"))
+    assert _state(data_dir)[sha]["status"] == "retry"
+
+
+def test_data_dir_comes_from_dotenv(tmp_path: Path, monkeypatch):
+    """OPENKP_DATA_DIR in .env must point the exporter at the server's folder."""
+    monkeypatch.delenv("OPENKP_DATA_DIR", raising=False)
+    monkeypatch.setenv("PAPERLESS_URL", "https://paperless.test")
+    monkeypatch.setenv("PAPERLESS_TOKEN", TOKEN)
+    profile = tmp_path / "profile"
+    (profile / "downloads").mkdir(parents=True)
+    _add(profile, "a.pdf", b"1", title="A")
+    seen: dict = {}
+
+    def fake_load_dotenv(*a, **kw):
+        seen["called"] = True
+        monkeypatch.setenv("OPENKP_DATA_DIR", str(profile))
+        return True
+
+    monkeypatch.setattr(ep, "load_dotenv", fake_load_dotenv)
+    fake = FakePaperless()
+    args = ep.build_parser().parse_args(["--wait", "0"])
+    ep.run(args, transport=httpx.MockTransport(fake))
+    assert seen.get("called")
+    assert len(fake.uploads) == 1
