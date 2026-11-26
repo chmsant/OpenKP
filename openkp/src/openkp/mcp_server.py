@@ -555,10 +555,11 @@ async def list_immunizations() -> dict:
 
     An empty list is valid. Kaiser reports state as-is, no guideline math.
     See `docs/research/endpoints/immunizations.md`.
+
+    Works in proxy (act-for) profiles: the endpoint was confirmed live to
+    follow Kaiser's proxy switch.
     """
-    store = _get_session_store()
-    client = KaiserRequest(store)
-    response = await fetch_immunizations(client)
+    response = await _proxy_read(fetch_immunizations)
     return response.model_dump()
 
 

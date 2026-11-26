@@ -13,3 +13,19 @@ def _isolate_data_dir(monkeypatch, tmp_path_factory):
     """
     monkeypatch.setenv("OPENKP_DATA_DIR", str(tmp_path_factory.mktemp("openkp-data")))
     monkeypatch.delenv("OPENKP_PROFILE", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _never_launch_a_real_browser(monkeypatch):
+    """No test may drive a real Chromium to kp.org.
+
+    If a safeguard regresses and a test falls through to the real login
+    path, fail fast here instead of opening a browser and submitting the
+    test's fake credentials to Kaiser. Tests that exercise auth.py patch
+    `async_playwright` themselves, which overrides this.
+    """
+
+    def _blocked():
+        raise RuntimeError("test tried to launch a real browser (async_playwright is blocked in tests)")
+
+    monkeypatch.setattr("openkp.scrapers.auth.async_playwright", _blocked)

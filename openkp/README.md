@@ -166,6 +166,34 @@ Store each password in the keyring under its own username (step 2), then give ea
 
 Values in the `env` block take precedence over anything in `openkp/.env`, so leave `KP_USERNAME` and `OPENKP_DATA_DIR` out of `.env` when you run more than one profile.
 
+### Reading a dependent's chart (proxy access)
+
+If your kp.org login has proxy access to someone else's chart (a child, for example), you can run a separate **proxy profile** for that chart. It signs in as you and switches Kaiser to the dependent's chart.
+
+1. From your normal profile, ask Claude to run `list_proxy_targets`. It lists every chart your login can act for, each with an `id_sha256` fingerprint. Raw ids are never shown.
+2. Add a server entry for the dependent with **its own data dir** and the dependent's fingerprint:
+
+   ```json
+   "openkp-kid": {
+     "command": "/Users/<YOUR_USERNAME>/OpenKP/openkp/.venv/bin/openkp",
+     "env": {
+       "KP_USERNAME": "alex@example.com",
+       "OPENKP_DATA_DIR": "/Users/<YOUR_USERNAME>/.openkp-kid",
+       "OPENKP_PROFILE": "kid",
+       "OPENKP_ACT_FOR_ID_SHA256": "<id_sha256 from list_proxy_targets>"
+     }
+   }
+   ```
+
+   Prefer the fingerprint over `OPENKP_ACT_FOR_NAME`. A newborn's chart starts under a placeholder name and is renamed later, but the fingerprint stays the same.
+
+How it stays safe:
+
+- **Only tools confirmed to follow Kaiser's proxy switch work in a proxy profile.** Today that's `list_immunizations`, plus `list_proxy_targets`, `session_check`, `whoami` and `ping`. Everything else refuses. Some Kaiser surfaces don't follow the switch: profile and pharmacy keep returning the account holder's data. A tool on that list would hand you your own medications labeled as your child's.
+- **No writes.** Refills and messages refuse in a proxy profile.
+- **Every read is checked twice.** Before the read, OpenKP confirms Kaiser reports the dependent's chart as active, switching if needed. After the read, it confirms again. If the session silently signed in again during the call, which resets Kaiser to your own chart, the result is thrown away.
+- A proxy profile marks its data dir, and a normal profile refuses to use that dir.
+
 ## First things to try
 
 Once `session_check` returns `status: alive`, try these prompts in Claude Desktop. Lead with the questions that show what OpenKP makes possible — surface insight your patient portal isn't built to give you:
