@@ -68,6 +68,16 @@ The scan is deliberately **not** wired into CI. A publication gate that fails
 a release on a false positive gets disabled, and this one is meant to be read
 by a human.
 
+If you'd rather not remember to run it, install the opt-in local pre-commit
+hook. It runs the scan on every commit and also checks staged lines against a
+personal denylist (names, MRNs) that lives in `.git/info/` and is never
+committed. It adds `*.har` to `.git/info/exclude` too. It's local only, so it
+doesn't change the no-CI decision above.
+
+```
+bash scripts/install-hooks.sh
+```
+
 ## 3. PHI outside the repo (informational, not a publication concern)
 
 These have always lived outside the repo (gitignored or sidecar) and will continue to:
