@@ -26,7 +26,9 @@
 set -euo pipefail
 
 ROOT="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
-GIT_DIR="$(git -C "$ROOT" rev-parse --absolute-git-dir)"
+# The common dir, not --absolute-git-dir: from a linked worktree the latter
+# is .git/worktrees/<name>, where git never looks for hooks.
+GIT_DIR="$(cd "$ROOT" && cd "$(git rev-parse --git-common-dir)" && pwd)"
 HOOK="$GIT_DIR/hooks/pre-commit"
 DENYLIST="$GIT_DIR/info/phi-denylist"
 EXCLUDE="$GIT_DIR/info/exclude"
@@ -48,7 +50,7 @@ cat > "$HOOK" <<'HOOK_EOF'
 # openkp-phi-hook (installed by scripts/install-hooks.sh, safe to re-install)
 set -u
 root="$(git rev-parse --show-toplevel)"
-git_dir="$(git rev-parse --absolute-git-dir)"
+git_dir="$(cd "$(git rev-parse --git-common-dir)" && pwd)"
 
 if ! command -v python3 >/dev/null 2>&1; then
     echo "pre-commit: python3 not found, so the PHI scan couldn't run. Install it,"
