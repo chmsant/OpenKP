@@ -133,6 +133,24 @@ Fully quit Claude Desktop (Cmd+Q, not just close-window) and relaunch. In a new 
 
 The first time, a Chromium window pops up showing the kp.org login. Sign in (including MFA). When kp.org's home page loads, OpenKP captures the session and the window closes automatically. Subsequent calls are silent.
 
+### 5b. Or connect Claude Code
+
+If you use Claude Code instead of (or as well as) Claude Desktop, register the same binary with `claude mcp add`. The name comes first, then any `-e` flags, then `--` and the absolute path:
+
+```bash
+claude mcp add --scope user openkp -- /Users/<YOUR_USERNAME>/OpenKP/openkp/.venv/bin/openkp
+```
+
+`--scope user` makes it available in every project. Leave it off to register it only for the current directory.
+
+To start with write tools disabled, pass the dry-run flag as an environment variable:
+
+```bash
+claude mcp add --scope user openkp -e OPENKP_DRY_RUN=1 -- /Users/<YOUR_USERNAME>/OpenKP/openkp/.venv/bin/openkp
+```
+
+Start a new `claude` session, run `/mcp` to confirm `openkp` is connected, then ask Claude to use openkp's `session_check` tool. The first call opens the same Chromium login window as above. Claude Code and Claude Desktop can share one install. They both use the session saved under `~/.openkp/`.
+
 ## First things to try
 
 Once `session_check` returns `status: alive`, try these prompts in Claude Desktop. Lead with the questions that show what OpenKP makes possible — surface insight your patient portal isn't built to give you:
