@@ -4,6 +4,10 @@ Reads credentials from, in priority order:
 1. Environment variables (or .env file)
 2. macOS Keychain / system keyring (service: "openkp", account: username)
 
+Interactive login mode (OPENKP_INTERACTIVE_LOGIN=1) skips both. The person
+types their own password into Kaiser's sign-in page, and OpenKP never holds
+it. KP_USERNAME becomes optional in that mode.
+
 Never log or print the password. Never write it to disk.
 """
 
@@ -19,6 +23,7 @@ from dotenv import load_dotenv
 logger = logging.getLogger(__name__)
 
 KEYRING_SERVICE = "openkp"
+INTERACTIVE_LOGIN_ENV = "OPENKP_INTERACTIVE_LOGIN"
 
 
 @dataclass(frozen=True)
@@ -29,22 +34,34 @@ class Config:
     password: str
     data_dir: Path
     log_level: str
+    # True when OPENKP_INTERACTIVE_LOGIN is set. password is then always "".
+    interactive_login: bool = False
 
 
 def load_config() -> Config:
     """Load config from environment and/or keychain. Raises if required values missing."""
     load_dotenv()
 
+    interactive_login = _env_flag(INTERACTIVE_LOGIN_ENV)
     username = os.getenv("KP_USERNAME", "").strip()
-    if not username:
+    if not username and not interactive_login:
         raise RuntimeError(
             "KP_USERNAME is not set. Copy .env.example to .env and fill in your username."
         )
 
-    password = os.getenv("KP_PASSWORD", "").strip()
-    if not password:
-        password = _load_password_from_keyring(username)
-    if not password:
+    if interactive_login:
+        # Never read a stored password in this mode, not even one left in .env.
+        if os.getenv("KP_PASSWORD", "").strip():
+            logger.warning(
+                "%s is on, so KP_PASSWORD is ignored. Remove it from .env.",
+                INTERACTIVE_LOGIN_ENV,
+            )
+        password = ""
+    else:
+        password = os.getenv("KP_PASSWORD", "").strip()
+        if not password:
+            password = _load_password_from_keyring(username)
+    if not password and not interactive_login:
         raise RuntimeError(
             "No password found. Set KP_PASSWORD in .env, or store it in the system keyring:\n"
             f"    python -c 'import keyring; keyring.set_password(\"{KEYRING_SERVICE}\", "
@@ -63,7 +80,13 @@ def load_config() -> Config:
         password=password,
         data_dir=data_dir,
         log_level=log_level,
+        interactive_login=interactive_login,
     )
+
+
+def _env_flag(name: str) -> bool:
+    """Truthy env values: "1", "true", "yes", "on" (case-insensitive)."""
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _load_password_from_keyring(username: str) -> str:

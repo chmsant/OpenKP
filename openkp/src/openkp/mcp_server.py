@@ -96,6 +96,7 @@ def whoami() -> dict:
     return {
         "username": cfg.username,
         "data_dir": str(cfg.data_dir),
+        "login_mode": "interactive" if cfg.interactive_login else "stored",
         "version": __version__,
     }
 

@@ -228,7 +228,7 @@ The password never touches OpenKP — not in keyring, not in env, not in memory.
 
 **Trade-off:** She has to re-type at session expiry (probably weekly, based on what we know of KP cookie lifetimes). For the helper case, that's a feature, not a bug.
 
-**What's missing:** Implementation in `auth.py`, plus a README note explaining when to use this mode.
+**Status:** Built as `OPENKP_INTERACTIVE_LOGIN=1`. It also turns off Chromium's password manager in the persistent profile (Preferences plus `--disable-save-password-bubble`), since otherwise the typed password could be offered for saving into the profile. README step 2 documents it. Not yet exercised against a live kp.org login.
 
 ---
 

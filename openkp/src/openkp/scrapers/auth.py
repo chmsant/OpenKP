@@ -22,6 +22,10 @@ Strategy (see ADR-005):
 - First run: launch Chromium headed with a persistent user data dir.
   OpenKP autofills username + password from keyring. User handles any MFA
   challenge in the visible window.
+- Interactive login mode (empty password, OPENKP_INTERACTIVE_LOGIN=1):
+  same window, but OpenKP fills at most the username and the person types
+  their own password. Chromium's password manager is turned off in the
+  profile either way, so a typed password isn't saved to disk.
 - Subsequent runs: reopen the same profile headless and probe
   /mycare/v1.0/user. If the session is alive, extract cookies. If not,
   caller falls back to interactive login.
@@ -37,6 +41,7 @@ import logging
 import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any
 
 from playwright.async_api import async_playwright
 
@@ -49,6 +54,11 @@ KP_HOST = "healthy.kaiserpermanente.org"
 
 # How long to wait for the user to finish MFA in the visible browser.
 INTERACTIVE_LOGIN_TIMEOUT_MS = 5 * 60 * 1000  # 5 minutes
+
+# Chromium flags for the login window. The bubble flag stops the "Save
+# password?" prompt. The Preferences written by `_disable_password_saving`
+# turn the password manager off for the profile itself.
+CHROMIUM_ARGS = ["--disable-save-password-bubble"]
 
 
 @dataclass
@@ -98,12 +108,14 @@ async def login_interactive(data_dir: Path, username: str, password: str) -> Kai
     """
     profile_dir = _profile_dir(data_dir)
     profile_dir.mkdir(parents=True, exist_ok=True)
+    _disable_password_saving(profile_dir)
 
     async with async_playwright() as pw:
         context = await pw.chromium.launch_persistent_context(
             user_data_dir=str(profile_dir),
             headless=False,
             viewport={"width": 1280, "height": 900},
+            args=CHROMIUM_ARGS,
         )
         try:
             page = context.pages[0] if context.pages else await context.new_page()
@@ -112,19 +124,9 @@ async def login_interactive(data_dir: Path, username: str, password: str) -> Kai
             await page.goto(KP_SIGN_ON_URL, wait_until="load")
 
             if PING_HOST in page.url:
-                logger.info("On Ping login form, autofilling credentials")
-                await page.wait_for_selector(
-                    'input[name="pf.username"]', state="visible", timeout=30_000
-                )
-                await page.fill('input[name="pf.username"]', username)
-                await page.fill('input[name="pf.pass"]', password)
-                # Submit by pressing Enter in the password field. This fires
-                # whatever onsubmit handlers Ping attached, which matters
-                # because those feed the risk-scoring fingerprint.
-                await page.press('input[name="pf.pass"]', "Enter")
-
+                await _fill_ping_form(page, username, password)
                 logger.info(
-                    "Credentials submitted, waiting up to %d seconds for login to complete "
+                    "Waiting up to %d seconds for login to complete "
                     "(including any MFA challenge)",
                     INTERACTIVE_LOGIN_TIMEOUT_MS // 1000,
                 )
@@ -151,6 +153,57 @@ async def login_interactive(data_dir: Path, username: str, password: str) -> Kai
             return KaiserSession(cookies=cookies, user_agent=user_agent)
         finally:
             await context.close()
+
+
+async def _fill_ping_form(page: Any, username: str, password: str) -> bool:
+    """Fill the Ping sign-in form. Returns True if credentials were submitted.
+
+    With a password: fill both fields and press Enter, as before.
+    Without one (interactive login mode): fill only the username if we have
+    it, never touch the password field, never submit. The person types the
+    password and submits it themselves.
+    """
+    await page.wait_for_selector('input[name="pf.username"]', state="visible", timeout=30_000)
+    if not password:
+        if username:
+            await page.fill('input[name="pf.username"]', username)
+        logger.info("Interactive login: sign in yourself in the browser window")
+        return False
+
+    logger.info("On Ping login form, autofilling credentials")
+    await page.fill('input[name="pf.username"]', username)
+    await page.fill('input[name="pf.pass"]', password)
+    # Submit by pressing Enter in the password field. This fires
+    # whatever onsubmit handlers Ping attached, which matters
+    # because those feed the risk-scoring fingerprint.
+    await page.press('input[name="pf.pass"]', "Enter")
+    return True
+
+
+def _disable_password_saving(profile_dir: Path) -> None:
+    """Turn off Chromium's password manager in the persistent profile.
+
+    Without this, a password typed into Kaiser's form can be offered for
+    saving and land in the profile's Login Data file. Merges into any
+    existing Preferences. Best-effort: a failure is logged, never raised.
+    """
+    prefs_path = profile_dir / "Default" / "Preferences"
+    try:
+        prefs: dict[str, Any] = {}
+        if prefs_path.exists():
+            loaded = json.loads(prefs_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                prefs = loaded
+        prefs["credentials_enable_service"] = False
+        profile = prefs.get("profile")
+        if not isinstance(profile, dict):
+            profile = {}
+        profile["password_manager_enabled"] = False
+        prefs["profile"] = profile
+        prefs_path.parent.mkdir(parents=True, exist_ok=True)
+        prefs_path.write_text(json.dumps(prefs), encoding="utf-8")
+    except (OSError, ValueError) as exc:
+        logger.warning("Could not disable password saving in the browser profile (%s)", type(exc).__name__)
 
 
 def _profile_dir(data_dir: Path) -> Path:
