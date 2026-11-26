@@ -95,18 +95,29 @@ def _ensure_private_dir(path: Path) -> None:
         logger.warning("Could not restrict downloads dir permissions (%s)", type(exc).__name__)
 
 
-def _free_path(out_dir: Path, filename: str, digest: str) -> tuple[Path, bool]:
+def _free_path(
+    out_dir: Path, filename: str, digest: str, *, kind: str = "", source_id: str = ""
+) -> tuple[Path, bool]:
     """Where to save `filename`. Returns (path, already_there).
 
-    Same name and same bytes: reuse it. Same name, different bytes (two labs
-    with one display name): pick `name (2).ext`, `name (3).ext`, and so on.
+    - Same name and same bytes: reuse it.
+    - Same name holding an earlier copy of the same Kaiser document (manifest
+      says same kind and source id): replace it. Kaiser builds lab and visit
+      PDFs on demand, so a re-download can differ byte for byte.
+    - Same name, a different document (two labs with one display name):
+      pick `name (2).ext`, `name (3).ext`, and so on.
     """
+    manifest = read_manifest(out_dir) if source_id else {}
     candidate = out_dir / filename
     stem, suffix = candidate.stem, candidate.suffix
     n = 1
     while candidate.exists():
-        if candidate.is_file() and not candidate.is_symlink() and sha256_file(candidate) == digest:
-            return candidate, True
+        if candidate.is_file() and not candidate.is_symlink():
+            if sha256_file(candidate) == digest:
+                return candidate, True
+            entry = manifest.get(candidate.name, {})
+            if source_id and entry.get("kind") == kind and entry.get("source_id") == source_id:
+                return candidate, False
         n += 1
         candidate = out_dir / f"{stem} ({n}){suffix}"
     return candidate, False
@@ -128,7 +139,7 @@ def save_download(
     """
     _ensure_private_dir(out_dir)
     digest = sha256_bytes(data)
-    path, already_there = _free_path(out_dir, filename, digest)
+    path, already_there = _free_path(out_dir, filename, digest, kind=kind, source_id=source_id)
     if not already_there:
         tmp = out_dir / f".{path.name}.openkp-tmp"
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)

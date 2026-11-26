@@ -48,3 +48,31 @@ def test_manifest_records_hash(tmp_path: Path):
     entry = json.loads(line)
     assert entry["kind"] == "visit_avs_pdf"
     assert entry["sha256"] == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+
+
+def test_redownload_of_same_document_replaces_it(tmp_path: Path):
+    """Kaiser regenerates PDFs, so a re-download differs byte for byte."""
+    out = tmp_path / "downloads"
+    first = save_download(out, "CBC.pdf", b"v1", kind="lab_pdf", source_id="order-1", title="CBC")
+    again = save_download(out, "CBC.pdf", b"v2", kind="lab_pdf", source_id="order-1", title="CBC")
+    assert again == first
+    assert again.read_bytes() == b"v2"
+    assert [p.name for p in out.glob("*.pdf")] == ["CBC.pdf"]
+
+
+def test_same_name_other_document_still_gets_a_new_name(tmp_path: Path):
+    out = tmp_path / "downloads"
+    save_download(out, "CBC.pdf", b"v1", kind="lab_pdf", source_id="order-1")
+    other = save_download(out, "CBC.pdf", b"v2", kind="lab_pdf", source_id="order-2")
+    other_kind = save_download(out, "CBC.pdf", b"v3", kind="visit_avs_pdf", source_id="order-1")
+    assert other.name == "CBC (2).pdf"
+    assert other_kind.name == "CBC (3).pdf"
+
+
+def test_redownload_finds_its_numbered_copy(tmp_path: Path):
+    out = tmp_path / "downloads"
+    save_download(out, "CBC.pdf", b"a", kind="lab_pdf", source_id="order-1")
+    second = save_download(out, "CBC.pdf", b"b", kind="lab_pdf", source_id="order-2")
+    again = save_download(out, "CBC.pdf", b"b2", kind="lab_pdf", source_id="order-2")
+    assert again == second and again.read_bytes() == b"b2"
+    assert len(list(out.glob("*.pdf"))) == 2

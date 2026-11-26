@@ -44,6 +44,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 import httpx
+from dotenv import load_dotenv
 
 from openkp.downloads_manifest import MANIFEST_FILENAME, read_manifest, sha256_file
 
@@ -53,6 +54,8 @@ PENDING_TTL_SECONDS = 60 * 60
 LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
 SKIP_SUFFIXES = (".tmp", ".part", ".crdownload")
 TERMINAL_STATUSES = {"done", "duplicate", "failed"}
+# Paperless (Celery) task states that mean the upload will never be consumed.
+FAILED_TASK_STATUSES = {"FAILURE", "REVOKED"}
 
 EXIT_OK = 0
 EXIT_FAILURES = 1
@@ -69,6 +72,12 @@ class Candidate:
     sha256: str
     title: str
     kind: str
+    source_id: str = ""
+
+    @property
+    def source_key(self) -> str:
+        """Which Kaiser document this is, or "" if unknown."""
+        return f"{self.kind}:{self.source_id}" if self.source_id else ""
 
 
 # --- local state -------------------------------------------------------------
@@ -149,6 +158,7 @@ def find_candidates(
                 sha256=digest,
                 title=title,
                 kind=str(entry.get("kind") or "unknown"),
+                source_id=str(entry.get("source_id") or ""),
             )
         )
     return out
@@ -253,7 +263,7 @@ def _apply_task(entry: dict[str, Any], status: str, doc_id: int | None, result: 
         entry["status"] = "done"
         if doc_id is not None:
             entry["document_id"] = doc_id
-    elif status == "FAILURE":
+    elif status in FAILED_TASK_STATUSES:
         entry["status"] = "duplicate" if "duplicate" in result.lower() else "failed"
     else:
         return
@@ -268,15 +278,14 @@ def refresh_pending(
         pending = [e for e in state.values() if e.get("status") == "pending" and e.get("task_id")]
         for entry in pending:
             status, doc_id, result = api.task_status(entry["task_id"])
-            if status == "UNKNOWN":
-                if _age_seconds(entry) > PENDING_TTL_SECONDS:
-                    # Paperless doesn't know this task (expired, or a
-                    # different instance). Send it again next run. Paperless
-                    # rejects a true duplicate by checksum, so that's safe.
-                    entry["status"] = "retry"
-                    entry["updated_at"] = _now()
-                continue
             _apply_task(entry, status, doc_id, result)
+            if entry.get("status") == "pending" and _age_seconds(entry) > PENDING_TTL_SECONDS:
+                # Still not finished after an hour: Paperless doesn't know the
+                # task (expired, or a different instance) or it's stuck in a
+                # non-final state such as RETRY. Send it again next run.
+                # Paperless rejects a true duplicate by checksum, so that's safe.
+                entry["status"] = "retry"
+                entry["updated_at"] = _now()
         still = any(e.get("status") == "pending" for e in state.values())
         if not still or time.monotonic() >= deadline:
             return
@@ -284,6 +293,9 @@ def refresh_pending(
 
 
 def run(args: argparse.Namespace, transport: httpx.BaseTransport | None = None) -> int:
+    # Same .env the server reads, so OPENKP_DATA_DIR there points both at
+    # one folder. Values already in the environment win.
+    load_dotenv()
     data_dir = Path(
         args.data_dir or os.getenv("OPENKP_DATA_DIR", "").strip() or "~/.openkp"
     ).expanduser()
@@ -297,15 +309,34 @@ def run(args: argparse.Namespace, transport: httpx.BaseTransport | None = None) 
         for entry in state.values():
             if entry.get("status") == "failed":
                 entry["status"] = "retry"
+    exported_sources = {
+        str(e.get("source_key"))
+        for e in state.values()
+        if e.get("source_key") and e.get("status") in {"done", "duplicate", "pending"}
+    }
     todo: list[Candidate] = []
     seen: set[str] = set()
+    superseded = 0
     for c in candidates:
         # Same bytes under two names is one document. Send it once.
         if c.sha256 in seen:
             continue
         seen.add(c.sha256)
-        if state.get(c.sha256, {}).get("status") not in TERMINAL_STATUSES | {"pending"}:
-            todo.append(c)
+        if state.get(c.sha256, {}).get("status") in TERMINAL_STATUSES | {"pending"}:
+            continue
+        # A re-download of a Kaiser document already sent (Kaiser regenerates
+        # PDFs, so the bytes differ). Skip unless asked for updated copies.
+        if c.source_key and c.source_key in exported_sources and not args.include_updated:
+            superseded += 1
+            continue
+        if c.source_key:
+            exported_sources.add(c.source_key)
+        todo.append(c)
+    if superseded:
+        print(
+            f"Skipping {superseded} re-downloaded file(s) of documents already exported. "
+            "Pass --include-updated to send them as new documents."
+        )
     if args.limit:
         todo = todo[: args.limit]
 
@@ -351,6 +382,8 @@ def run(args: argparse.Namespace, transport: httpx.BaseTransport | None = None) 
         failures = 0
         for c in todo:
             entry = {"file": c.path.name, "kind": c.kind, "updated_at": _now()}
+            if c.source_key:
+                entry["source_key"] = c.source_key
             try:
                 entry["task_id"] = api.upload(c, fields)
                 entry["status"] = "pending"
@@ -393,6 +426,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--wait", type=float, default=30.0,
                    help="seconds to wait for Paperless to finish consuming (default 30)")
     p.add_argument("--retry-failed", action="store_true", help="retry files that failed before")
+    p.add_argument("--include-updated", action="store_true",
+                   help="also send re-downloaded copies of documents already exported")
     p.add_argument("--include-unlisted", action="store_true",
                    help="also export files in downloads/ that no OpenKP download tool recorded")
     p.add_argument("--show-names", action="store_true",

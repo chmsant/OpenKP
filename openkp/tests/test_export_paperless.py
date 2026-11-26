@@ -65,11 +65,14 @@ def data_dir(tmp_path: Path, monkeypatch) -> Path:
     return tmp_path
 
 
-def _add(data_dir: Path, name: str, content: bytes, title: str = "", kind: str = "lab_pdf") -> Path:
+def _add(
+    data_dir: Path, name: str, content: bytes, title: str = "", kind: str = "lab_pdf",
+    source_id: str = "",
+) -> Path:
     path = data_dir / "downloads" / name
     path.write_bytes(content)
     if title:
-        record_download(path, kind=kind, source_id="x", title=title)
+        record_download(path, kind=kind, source_id=source_id or f"src-{name}", title=title)
     return path
 
 
@@ -342,3 +345,70 @@ def test_state_file_is_owner_only(data_dir: Path):
     _run(data_dir, FakePaperless())
     mode = (data_dir / ep.STATE_FILENAME).stat().st_mode & 0o777
     assert mode == 0o600
+
+
+# --- re-downloads, cancelled tasks, .env (from code review) ---
+
+
+def test_redownload_of_exported_document_is_skipped(data_dir: Path, capsys):
+    _add(data_dir, "CBC.pdf", b"v1", title="CBC", source_id="order-1")
+    _run(data_dir, FakePaperless())
+    # Kaiser regenerated the PDF: same document, different bytes.
+    _add(data_dir, "CBC.pdf", b"v2", title="CBC", source_id="order-1")
+    fake = FakePaperless()
+    assert _run(data_dir, fake) == 0
+    assert fake.uploads == []
+    assert "Skipping 1 re-downloaded" in capsys.readouterr().out
+    opt_in = FakePaperless()
+    _run(data_dir, opt_in, "--include-updated")
+    assert len(opt_in.uploads) == 1
+
+
+def test_different_documents_with_one_kind_all_upload(data_dir: Path):
+    _add(data_dir, "a.pdf", b"1", title="A", source_id="order-1")
+    _add(data_dir, "b.pdf", b"2", title="B", source_id="order-2")
+    fake = FakePaperless()
+    _run(data_dir, fake)
+    assert len(fake.uploads) == 2
+
+
+def test_revoked_task_is_failed_not_pending(data_dir: Path):
+    _add(data_dir, "a.pdf", b"1", title="A")
+    assert _run(data_dir, FakePaperless(task_status="REVOKED", task_result="")) == 1
+    (entry,) = _state(data_dir).values()
+    assert entry["status"] == "failed"
+
+
+def test_task_stuck_in_retry_is_resent_after_ttl(data_dir: Path):
+    _add(data_dir, "a.pdf", b"1", title="A")
+    _run(data_dir, FakePaperless(task_status="RETRY"))
+    state = _state(data_dir)
+    (sha,) = state
+    assert state[sha]["status"] == "pending"
+    state[sha]["updated_at"] = "2000-01-01T00:00:00+00:00"
+    (data_dir / ep.STATE_FILENAME).write_text(json.dumps(state))
+    _run(data_dir, FakePaperless(task_status="RETRY"))
+    assert _state(data_dir)[sha]["status"] == "retry"
+
+
+def test_data_dir_comes_from_dotenv(tmp_path: Path, monkeypatch):
+    """OPENKP_DATA_DIR in .env must point the exporter at the server's folder."""
+    monkeypatch.delenv("OPENKP_DATA_DIR", raising=False)
+    monkeypatch.setenv("PAPERLESS_URL", "https://paperless.test")
+    monkeypatch.setenv("PAPERLESS_TOKEN", TOKEN)
+    profile = tmp_path / "profile"
+    (profile / "downloads").mkdir(parents=True)
+    _add(profile, "a.pdf", b"1", title="A")
+    seen: dict = {}
+
+    def fake_load_dotenv(*a, **kw):
+        seen["called"] = True
+        monkeypatch.setenv("OPENKP_DATA_DIR", str(profile))
+        return True
+
+    monkeypatch.setattr(ep, "load_dotenv", fake_load_dotenv)
+    fake = FakePaperless()
+    args = ep.build_parser().parse_args(["--wait", "0"])
+    ep.run(args, transport=httpx.MockTransport(fake))
+    assert seen.get("called")
+    assert len(fake.uploads) == 1
