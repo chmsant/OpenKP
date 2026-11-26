@@ -191,6 +191,8 @@ If your kp.org login has proxy access to someone else's chart (a child, for exam
    }
    ```
 
+   Set `OPENKP_ACT_FOR_*` only in this server's `env` block, never in `openkp/.env`. In `.env` it would turn every profile into a proxy profile.
+
    Prefer the fingerprint over `OPENKP_ACT_FOR_NAME`. A newborn's chart starts under a placeholder name and is renamed later, but the fingerprint stays the same.
 
 How it stays safe:
