@@ -495,3 +495,30 @@ async def test_proxy_downloads_save_in_profile_and_are_removed_on_drift(
     with pytest.raises(ProxyContextError):
         await getattr(mcp_server, tool)(**kwargs)
     assert not saved.exists()
+
+
+
+# --- read_visit_notes leaves out raw HTML unless asked ---
+
+
+@pytest.mark.parametrize("include_html", [False, True])
+async def test_read_visit_notes_html_is_opt_in(monkeypatch, tmp_path, include_html):
+    monkeypatch.setattr("openkp.config.load_dotenv", lambda *a, **kw: None)
+    monkeypatch.setenv("KP_USERNAME", "a@example.com")
+    monkeypatch.setenv("KP_PASSWORD", "x")
+    monkeypatch.setenv("OPENKP_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(mcp_server, "_get_session_store", lambda: SimpleNamespace(generation=1, data_dir=tmp_path))
+    monkeypatch.setattr(mcp_server, "KaiserRequest", lambda store: SimpleNamespace(session_store=store))
+    from openkp.scrapers.visit_notes import VisitNote, VisitNotesResponse
+
+    async def fake_fetch(client, csn):
+        note = VisitNote(note_type="Progress Notes", content_text="text", content_html="<p>text</p>")
+        avs = VisitNote(note_type="After Visit Summary", content_text="avs", content_html="<p>avs</p>")
+        return VisitNotesResponse(csn=csn, notes=[note], after_visit_summary=avs)
+
+    monkeypatch.setattr(mcp_server, "fetch_visit_notes", fake_fetch)
+    out = await mcp_server.read_visit_notes("c", include_html=include_html)
+    assert out["notes"][0]["content_text"] == "text"
+    assert out["after_visit_summary"]["content_text"] == "avs"
+    html = (out["notes"][0]["content_html"], out["after_visit_summary"]["content_html"])
+    assert html == (("<p>text</p>", "<p>avs</p>") if include_html else (None, None))
