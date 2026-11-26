@@ -54,12 +54,17 @@ class SessionStore:
         self._session: KaiserSession | None = None
         self._lock = asyncio.Lock()
         self._keepalive_task: asyncio.Task[None] | None = None
+        # Bumped every time a session is (re)established. A re-login resets
+        # Kaiser's proxy context to the account holder server-side, so proxy
+        # mode compares this before and after a tool call.
+        self.generation = 0
 
     async def get_session(self) -> KaiserSession:
         """Return a live session, authenticating if needed."""
         async with self._lock:
             if self._session is None:
                 self._session = await self._authenticate()
+                self.generation += 1
                 self._ensure_keepalive_running()
             return self._session
 

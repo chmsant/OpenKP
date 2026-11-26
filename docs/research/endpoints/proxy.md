@@ -80,3 +80,20 @@ The menu and `proxySubjects` exist only in the rendered page. A `fetch` of `/myc
 1. Does a persisted `session.json` reload in proxy context? `KeepAlive` keeps the context alive, but a new process might inherit a stale dependent context. Always issue an explicit switch (or `mode=self`) at startup and verify with `ProxySwitch`.
 2. Do the other legacy read tools (labs, visits, messages, problems, allergies) all follow the switch? Probably, since they're the same `/mychartcn` family, but each needs one check. Messages are the riskiest, because the compose chain uses a self `wprId`.
 3. Is there a legacy medications endpoint that follows the switch?
+
+## Implementation (`scrapers/proxy.py`, `mcp_server._proxy_read`)
+
+- **Selector:** `OPENKP_ACT_FOR_ID_SHA256` (16 to 64 hex chars, a prefix of `sha256(Id)`) or `OPENKP_ACT_FOR_NAME` (exact, case-insensitive). Zero matches, multiple matches, or a match on the self entry are all errors.
+- **Switch:** follow `LinkUrl` only if it is `https://healthy.kaiserpermanente.org/mychartcn/inside.asp` with `mode=proxyswitch&action=switchcontext`. Redirects are followed only on that host.
+- **Deny by default:** in a proxy profile, `_get_session_store` refuses unless the tool opted in. `list_immunizations`, `list_past_visits`, `read_visit_notes` and `download_visit_avs_pdf` opt in through `_proxy_read`. `session_check` and `list_proxy_targets` opt in without touching chart data.
+- **`_proxy_read`:** `ensure_context` (switch if needed, then verify `IsSelected`), record `SessionStore.generation`, run the read, discard the result if the generation changed (a silent re-login resets the chart), then re-verify `IsSelected`.
+- A `proxy-profile` marker in the data dir stops a normal profile from reusing a proxy profile's session.
+- Tests break each of the three safeguards on purpose to prove the suite notices. A conftest fixture blocks real browser launches in every test.
+
+To allow another tool in proxy mode: check live that its endpoint follows the switch (compare self against the dependent), then route it through `_proxy_read` and add it to the README list.
+
+### Visits in proxy context (live 2026-11-26)
+
+- `/mychartcn/Visits/VisitsList/LoadPast` follows the switch. As the account holder it returned the holder's visits, as the dependent one visit, with no overlap between the two lists (visit ids compared as hashes).
+- Visit ids are scoped to the active chart. With the dependent active, `GetVisitDetailsPast` for one of the holder's visit ids returned HTTP 500, so `read_visit_notes` and `download_visit_avs_pdf` can't return another chart's documents under the dependent's name. Nothing was read and no file was written.
+- `download_visit_avs_pdf` removes its saved file if the after-read chart check fails.

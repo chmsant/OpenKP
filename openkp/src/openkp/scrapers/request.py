@@ -25,18 +25,24 @@ class KaiserRequest:
     def __init__(self, session_store: SessionStore) -> None:
         self.session_store = session_store
 
-    async def get(self, path: str, **kwargs: Any) -> httpx.Response:
-        return await self._request("GET", path, **kwargs)
+    async def get(
+        self, path: str, *, extra_cookies: httpx.Cookies | None = None, **kwargs: Any
+    ) -> httpx.Response:
+        """GET. `extra_cookies` are added on top of the session's cookies,
+        for multi-hop flows where one hop sets cookies the next one needs."""
+        return await self._request("GET", path, extra_cookies=extra_cookies, **kwargs)
 
     async def post(self, path: str, **kwargs: Any) -> httpx.Response:
         return await self._request("POST", path, **kwargs)
 
-    async def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+    async def _request(
+        self, method: str, path: str, *, extra_cookies: httpx.Cookies | None = None, **kwargs: Any
+    ) -> httpx.Response:
         session = await self.session_store.get_session()
         url = path if path.startswith("http") else KP_BASE + path
 
         async with httpx.AsyncClient(
-            cookies=cookies_to_httpx(session.cookies),
+            cookies=_jar(session.cookies, extra_cookies),
             headers={"User-Agent": session.user_agent},
             follow_redirects=False,
             timeout=30.0,
@@ -49,6 +55,7 @@ class KaiserRequest:
                 session = await self.session_store.get_session()
                 # One retry with the fresh session
                 async with httpx.AsyncClient(
+                    # Fresh login: extra cookies from the old session don't apply.
                     cookies=cookies_to_httpx(session.cookies),
                     headers={"User-Agent": session.user_agent},
                     follow_redirects=False,
@@ -57,6 +64,14 @@ class KaiserRequest:
                     response = await retry_client.request(method, url, **kwargs)
 
             return response
+
+
+def _jar(cookies: list[dict], extra: httpx.Cookies | None) -> httpx.Cookies:
+    jar = cookies_to_httpx(cookies)
+    if extra:
+        for c in extra.jar:
+            jar.jar.set_cookie(c)
+    return jar
 
 
 def _is_session_expired(response: httpx.Response) -> bool:

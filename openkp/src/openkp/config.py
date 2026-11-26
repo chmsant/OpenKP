@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -43,6 +44,14 @@ class Config:
     profile: str = ""
     # True when OPENKP_INTERACTIVE_LOGIN is set. password is then always "".
     interactive_login: bool = False
+    # Proxy (act-for) target. When either is set this process reads a
+    # dependent's chart instead of the account holder's. See README.
+    act_for_id_sha256: str = ""
+    act_for_name: str = ""
+
+    @property
+    def is_proxy(self) -> bool:
+        return bool(self.act_for_id_sha256 or self.act_for_name)
 
 
 def load_config() -> Config:
@@ -87,6 +96,13 @@ def load_config() -> Config:
 
     log_level = (os.getenv("OPENKP_LOG_LEVEL", "").strip() or "INFO").upper()
     profile = os.getenv("OPENKP_PROFILE", "").strip()
+    act_for_id_sha256 = os.getenv("OPENKP_ACT_FOR_ID_SHA256", "").strip().lower()
+    act_for_name = os.getenv("OPENKP_ACT_FOR_NAME", "").strip()
+    if act_for_id_sha256 and not re.fullmatch(r"[0-9a-f]{16,64}", act_for_id_sha256):
+        raise RuntimeError(
+            "OPENKP_ACT_FOR_ID_SHA256 must be 16 to 64 hex characters. "
+            "Copy it from list_proxy_targets."
+        )
 
     return Config(
         username=username,
@@ -95,6 +111,8 @@ def load_config() -> Config:
         log_level=log_level,
         profile=profile,
         interactive_login=interactive_login,
+        act_for_id_sha256=act_for_id_sha256,
+        act_for_name=act_for_name,
     )
 
 
