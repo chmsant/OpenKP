@@ -91,6 +91,17 @@ Then store the password in your macOS Keychain (more secure than the `.env` file
 
 If you accept the `keyring` prompt for keychain access, you're done. The password is now retrievable by OpenKP's process and nothing else.
 
+#### Or: don't store the password at all
+
+Set `OPENKP_INTERACTIVE_LOGIN=1` in `.env` and skip the keychain step. `KP_USERNAME` becomes optional too. When OpenKP needs a session, the Chromium window opens on Kaiser's sign-in page with at most your username filled in. You type the password and finish MFA yourself. OpenKP never reads, stores, or receives it, and Chromium's password manager is turned off in OpenKP's browser profile so the window won't save it either. If OpenKP can't turn that off, or the browser profile already holds passwords saved in stored mode, it refuses to open the window and tells you why. Move the old profile folder (`<data dir>/chromium-profile`) aside and sign in fresh.
+
+This is the mode to use when OpenKP runs on someone else's computer, for example a family member helping you.
+
+Know the trade-offs:
+
+- You sign in by hand every time the saved session expires (typically every few weeks). If it expires in the middle of a conversation, the next tool call opens the login window and waits up to 5 minutes for you.
+- The saved session itself (`<data dir>/session.json` and the browser profile) is still on disk. Anyone who can read those files can act as you until the session expires. That's true in both modes. Interactive mode only keeps the password out.
+
 ### 3. Verify the install (one-time, ~30 seconds)
 
 From `~/OpenKP/openkp`:
