@@ -91,6 +91,17 @@ Then store the password in your macOS Keychain (more secure than the `.env` file
 
 If you accept the `keyring` prompt for keychain access, you're done. The password is now retrievable by OpenKP's process and nothing else.
 
+#### Or: don't store the password at all
+
+Set `OPENKP_INTERACTIVE_LOGIN=1` in `.env` and skip the keychain step. `KP_USERNAME` becomes optional too. When OpenKP needs a session, the Chromium window opens on Kaiser's sign-in page with at most your username filled in. You type the password and finish MFA yourself. OpenKP never reads, stores, or receives it, and Chromium's password manager is turned off in OpenKP's browser profile so the window won't save it either. If OpenKP can't turn that off, or the browser profile already holds passwords saved in stored mode, it refuses to open the window and tells you why. Move the old profile folder (`<data dir>/chromium-profile`) aside and sign in fresh.
+
+This is the mode to use when OpenKP runs on someone else's computer, for example a family member helping you.
+
+Know the trade-offs:
+
+- You sign in by hand every time the saved session expires (typically every few weeks). If it expires in the middle of a conversation, the next tool call opens the login window and waits up to 5 minutes for you.
+- The saved session itself (`<data dir>/session.json` and the browser profile) is still on disk. Anyone who can read those files can act as you until the session expires. That's true in both modes. Interactive mode only keeps the password out.
+
 ### 3. Verify the install (one-time, ~30 seconds)
 
 From `~/OpenKP/openkp`:
@@ -132,6 +143,24 @@ Fully quit Claude Desktop (Cmd+Q, not just close-window) and relaunch. In a new 
 > Use openkp's session_check tool.
 
 The first time, a Chromium window pops up showing the kp.org login. Sign in (including MFA). When kp.org's home page loads, OpenKP captures the session and the window closes automatically. Subsequent calls are silent.
+
+### 5b. Or connect Claude Code
+
+If you use Claude Code instead of (or as well as) Claude Desktop, register the same binary with `claude mcp add`. The name comes first, then any `-e` flags, then `--` and the absolute path:
+
+```bash
+claude mcp add --scope user openkp -- /Users/<YOUR_USERNAME>/OpenKP/openkp/.venv/bin/openkp
+```
+
+`--scope user` makes it available in every project. Leave it off to register it only for the current directory.
+
+To start with write tools disabled, pass the dry-run flag as an environment variable:
+
+```bash
+claude mcp add --scope user openkp -e OPENKP_DRY_RUN=1 -- /Users/<YOUR_USERNAME>/OpenKP/openkp/.venv/bin/openkp
+```
+
+Start a new `claude` session, run `/mcp` to confirm `openkp` is connected, then ask Claude to use openkp's `session_check` tool. The first call opens the same Chromium login window as above. Claude Code and Claude Desktop can share one install. They both use the session saved under `~/.openkp/`.
 
 ### More than one Kaiser account on one machine
 

@@ -197,6 +197,7 @@ def whoami() -> dict:
         "username": cfg.username,
         "data_dir": str(cfg.data_dir),
         "profile": cfg.profile,
+        "login_mode": "interactive" if cfg.interactive_login else "stored",
         "acting_for": _selector(cfg).describe() if cfg.is_proxy else None,
         "version": __version__,
     }
