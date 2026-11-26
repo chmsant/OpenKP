@@ -33,6 +33,7 @@ from typing import Any
 from bs4 import BeautifulSoup
 from pydantic import BaseModel, Field
 
+from openkp.downloads_manifest import record_download
 from openkp.safety import audit_log_event, is_dry_run
 from openkp.scrapers.csrf import fetch_csrf_token
 from openkp.scrapers.request import KaiserRequest
@@ -433,6 +434,7 @@ async def download_message_attachment(
         safe += suffix
     out_path = out_dir / safe
     out_path.write_bytes(body)
+    record_download(out_path, kind="message_attachment", source_id=dcs_id, title=name_for_file)
 
     return MessageAttachmentDownload(
         status="downloaded",

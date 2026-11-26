@@ -32,6 +32,7 @@ from typing import Any
 from bs4 import BeautifulSoup
 from pydantic import BaseModel, Field
 
+from openkp.downloads_manifest import record_download
 from openkp.scrapers.csrf import fetch_csrf_token
 from openkp.scrapers.request import KaiserRequest
 
@@ -304,6 +305,7 @@ async def download_lab_result_pdf(
         safe += ".pdf"
     out_path = out_dir / safe
     out_path.write_bytes(pdf_bytes)
+    record_download(out_path, kind="lab_pdf", source_id=order_key, title=display_name)
 
     return LabPdfDownload(
         status="downloaded",
