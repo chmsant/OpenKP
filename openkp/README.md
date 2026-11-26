@@ -197,7 +197,7 @@ If your kp.org login has proxy access to someone else's chart (a child, for exam
 
 How it stays safe:
 
-- **Only tools confirmed to follow Kaiser's proxy switch work in a proxy profile.** Today that's `list_immunizations`, plus `list_proxy_targets`, `session_check`, `whoami` and `ping`. Everything else refuses. Some Kaiser surfaces don't follow the switch: profile and pharmacy keep returning the account holder's data. A tool on that list would hand you your own medications labeled as your child's.
+- **Only tools confirmed to follow Kaiser's proxy switch work in a proxy profile.** Today that's `list_immunizations`, `list_past_visits`, `read_visit_notes` and `download_visit_avs_pdf`, plus `list_proxy_targets`, `session_check`, `whoami` and `ping`. Everything else refuses. Some Kaiser surfaces don't follow the switch: profile and pharmacy keep returning the account holder's data. A tool on that list would hand you your own medications labeled as your child's.
 - **No writes.** Refills and messages refuse in a proxy profile.
 - **Every read is checked twice.** Before the read, OpenKP confirms Kaiser reports the dependent's chart as active, switching if needed. After the read, it confirms again. If the session silently signed in again during the call, which resets Kaiser to your own chart, the result is thrown away.
 - A proxy profile marks its data dir, and a normal profile refuses to use that dir.

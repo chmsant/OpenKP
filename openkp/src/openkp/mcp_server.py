@@ -43,6 +43,7 @@ from openkp.scrapers.care_team import fetch_care_team
 from openkp.scrapers.immunizations import fetch_immunizations
 from openkp.scrapers.implants import fetch_implants
 from openkp.scrapers.visit_notes import (
+    AvsPdfDownload,
     download_visit_avs_pdf as _download_visit_avs_pdf,
     fetch_visit_notes,
 )
@@ -999,15 +1000,18 @@ async def list_past_visits(
     Note: `time_display` is None for some visit types (refills, etc).
     Trust `instant_iso` as the authoritative timestamp.
 
+    Works in proxy (act-for) profiles: confirmed live to follow Kaiser's
+    proxy switch.
+
     See `docs/research/endpoints/appointments.md`.
     """
-    store = _get_session_store()
-    client = KaiserRequest(store)
-    response = await fetch_past_visits(
-        client,
-        max_pages=max_pages,
-        page_size=page_size,
-        until_iso=until_iso,
+    response = await _proxy_read(
+        lambda client: fetch_past_visits(
+            client,
+            max_pages=max_pages,
+            page_size=page_size,
+            until_iso=until_iso,
+        )
     )
     return response.model_dump()
 
@@ -1043,11 +1047,16 @@ async def read_visit_notes(csn: str) -> dict:
     Some visit types (refills, walk-ins) have no clinical notes AND no AVS;
     expect both `notes=[]` and `after_visit_summary=None` in that case.
 
+    Hospital stays come back with `visit_type: "Hospital stay"`,
+    `encounter_type: "inpatient"`, and `is_admission_active`. While the
+    stay is active, notes keep arriving.
+
+    Works in proxy (act-for) profiles. Kaiser scopes the visit id to the
+    active chart (confirmed live: another chart's visit id is refused).
+
     See `docs/research/endpoints/visit_notes.md`.
     """
-    store = _get_session_store()
-    client = KaiserRequest(store)
-    response = await fetch_visit_notes(client, csn)
+    response = await _proxy_read(lambda client: fetch_visit_notes(client, csn))
     return response.model_dump()
 
 
@@ -1066,11 +1075,28 @@ async def download_visit_avs_pdf(csn: str) -> dict:
       - "no_pdf_available"  — visit has no AVS (refills, etc).
       - "error"             — `reason` holds a short explanation.
 
+    Works in proxy (act-for) profiles, saving into that profile's own
+    downloads folder. If the chart check after the download fails, the
+    saved file is removed.
+
     See `docs/research/endpoints/visit_notes.md`.
     """
-    store = _get_session_store()
-    client = KaiserRequest(store)
-    outcome = await _download_visit_avs_pdf(client, csn, download_dir=_downloads_dir(store))
+    saved: list[AvsPdfDownload] = []
+
+    async def read(client: KaiserRequest) -> AvsPdfDownload:
+        outcome = await _download_visit_avs_pdf(
+            client, csn, download_dir=_downloads_dir(client.session_store)
+        )
+        saved.append(outcome)
+        return outcome
+
+    try:
+        outcome = await _proxy_read(read)
+    except ProxyContextError:
+        for o in saved:
+            if o.status == "downloaded" and o.path:
+                Path(o.path).unlink(missing_ok=True)
+        raise
     return outcome.model_dump()
 
 

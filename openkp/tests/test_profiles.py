@@ -71,6 +71,12 @@ async def test_download_tools_write_under_profile_data_dir(
         return _Outcome()
 
     profile_dir = tmp_path / "profile-a"
+    # Some download tools load config first (proxy-aware reads), so give them
+    # a plain, non-proxy one.
+    monkeypatch.setattr("openkp.config.load_dotenv", lambda *a, **kw: None)
+    monkeypatch.setenv("KP_USERNAME", "a@example.com")
+    monkeypatch.setenv("KP_PASSWORD", "x")
+    monkeypatch.setenv("OPENKP_DATA_DIR", str(profile_dir))
     monkeypatch.setattr(mcp_server, "_get_session_store", lambda: _fake_store(profile_dir))
     monkeypatch.setattr(mcp_server, "KaiserRequest", lambda store: SimpleNamespace(session_store=store))
     monkeypatch.setattr(mcp_server, scraper_attr, fake_scraper)

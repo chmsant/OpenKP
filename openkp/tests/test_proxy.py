@@ -312,6 +312,64 @@ async def test_list_immunizations_is_allowed_in_proxy_mode(proxy_env, monkeypatc
     assert await mcp_server.list_immunizations() == {"total_count": 1}
 
 
+class _Dump:
+    def __init__(self, data):
+        self.data = data
+
+    def model_dump(self):
+        return self.data
+
+
+async def test_visit_tools_are_allowed_in_proxy_mode(proxy_env, monkeypatch):
+    portal = FakePortal()
+    _wire_portal(monkeypatch, portal, SimpleNamespace(generation=1, data_dir=proxy_env))
+
+    async def fake_past(client, **kw):
+        assert client.active == "WP-kid"
+        return _Dump({"total_count": 1})
+
+    async def fake_notes(client, csn):
+        assert client.active == "WP-kid" and csn == "csn-1"
+        return _Dump({"csn": csn})
+
+    monkeypatch.setattr(mcp_server, "fetch_past_visits", fake_past)
+    monkeypatch.setattr(mcp_server, "fetch_visit_notes", fake_notes)
+    assert await mcp_server.list_past_visits() == {"total_count": 1}
+    assert await mcp_server.read_visit_notes("csn-1") == {"csn": "csn-1"}
+
+
+async def test_avs_download_saves_into_the_proxy_profile(proxy_env, monkeypatch):
+    portal = FakePortal()
+    portal.session_store = SimpleNamespace(generation=1, data_dir=proxy_env)
+    _wire_portal(monkeypatch, portal, portal.session_store)
+
+    async def fake_download(client, csn, download_dir):
+        assert client.active == "WP-kid"
+        assert download_dir == proxy_env / "downloads"
+        return mcp_server.AvsPdfDownload(status="no_pdf_available")
+
+    monkeypatch.setattr(mcp_server, "_download_visit_avs_pdf", fake_download)
+    assert (await mcp_server.download_visit_avs_pdf("csn-1"))["status"] == "no_pdf_available"
+
+
+async def test_avs_download_is_removed_when_the_chart_check_fails(proxy_env, monkeypatch):
+    portal = FakePortal()
+    portal.session_store = SimpleNamespace(generation=1, data_dir=proxy_env)
+    _wire_portal(monkeypatch, portal, portal.session_store)
+    saved = proxy_env / "downloads" / "AVS.pdf"
+
+    async def fake_download(client, csn, download_dir):
+        download_dir.mkdir(parents=True, exist_ok=True)
+        saved.write_bytes(b"%PDF")
+        client.active = "WP-kid2"  # chart drifted during the call
+        return mcp_server.AvsPdfDownload(status="downloaded", path=str(saved))
+
+    monkeypatch.setattr(mcp_server, "_download_visit_avs_pdf", fake_download)
+    with pytest.raises(ProxyContextError):
+        await mcp_server.download_visit_avs_pdf("csn-1")
+    assert not saved.exists()
+
+
 async def test_list_proxy_targets_returns_fingerprints_not_ids(proxy_env, monkeypatch):
     portal = FakePortal()
     _wire_portal(monkeypatch, portal, SimpleNamespace(generation=1, data_dir=proxy_env))
