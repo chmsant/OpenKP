@@ -107,6 +107,11 @@ class VisitNotesResponse(BaseModel):
     encounter_date: str | None = None
     department: str | None = None
     primary_provider: str | None = None
+    # Kaiser's encounterType: "ambulatory", "inpatient", ...
+    encounter_type: str | None = None
+    # Inpatient only: True while the patient is still admitted. Notes keep
+    # arriving, so a re-read later returns more.
+    is_admission_active: bool | None = None
     notes: list[VisitNote] = Field(default_factory=list)
     after_visit_summary: VisitNote | None = None
     avs_pdf_dcs_id: str | None = None       # Pass to download_visit_avs_pdf
@@ -143,6 +148,14 @@ async def fetch_visit_notes(client: KaiserRequest, csn: str) -> VisitNotesRespon
     )
     summary = detail_payload.get("visitSummaryInfo") if isinstance(detail_payload, dict) else None
     summary = summary if isinstance(summary, dict) else {}
+    if not summary and isinstance(detail_payload, dict):
+        # Hospital stays (encounterType "inpatient") leave visitSummaryInfo
+        # empty and carry date and location in admissionSummaryInfo instead
+        # (live 2026-11-26: admissionDate "Nov 23, 2026", locationName).
+        summary = _admission_as_summary(detail_payload.get("admissionSummaryInfo"))
+    encounter_type = (
+        _str_or_none(detail_payload.get("encounterType")) if isinstance(detail_payload, dict) else None
+    )
     avs_info = detail_payload.get("avsInfo") if isinstance(detail_payload, dict) else None
     avs_dcs_id = _extract_avs_dcs_id(avs_info)
 
@@ -247,6 +260,12 @@ async def fetch_visit_notes(client: KaiserRequest, csn: str) -> VisitNotesRespon
         encounter_date=_str_or_none(summary.get("encounterDate")),
         department=_str_or_none(summary.get("department")),
         primary_provider=_str_or_none(summary.get("provider")),
+        encounter_type=encounter_type,
+        is_admission_active=(
+            bool(avs_info.get("isAdmissionActive"))
+            if encounter_type == "inpatient" and isinstance(avs_info, dict)
+            else None
+        ),
         notes=notes,
         after_visit_summary=avs_note,
         avs_pdf_dcs_id=avs_dcs_id,
@@ -486,6 +505,17 @@ def _str_or_none(value: Any) -> str | None:
         return None
     s = str(value).strip()
     return s or None
+
+
+def _admission_as_summary(admission: Any) -> dict:
+    """Map admissionSummaryInfo onto the visitSummaryInfo keys we read."""
+    if not isinstance(admission, dict):
+        return {}
+    return {
+        "visitType": "Hospital stay",
+        "encounterDate": admission.get("admissionDate"),
+        "department": admission.get("locationName"),
+    }
 
 
 def _display_date_to_iso(value: Any) -> str | None:

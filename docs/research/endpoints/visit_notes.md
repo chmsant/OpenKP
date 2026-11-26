@@ -86,6 +86,22 @@ Kaiser scopes CSRF tokens by referer page. Reusing a token from the wrong page b
 }
 ```
 
+### Hospital stays (`encounterType: "inpatient"`)
+
+Live 2026-11-26 (keys and formats only): an inpatient stay returns `visitSummaryInfo: {}`. Date and location come in `admissionSummaryInfo` instead, and `avsInfo` has `primaryAvs` and `additionalDocuments` in place of `avsSnapshots`.
+
+```json
+"admissionSummaryInfo": {
+  "isBedsideActive": false,
+  "isFFUpdatesEnabled": false,
+  "admissionDate": "Jan 01, 2025",
+  "locationName": "SAMPLE-HOSPITAL",
+  "visitDetailsURL": ""
+}
+```
+
+`avsInfo.isAdmissionActive` is `true` while the patient is still admitted. OpenKP falls back to `admissionSummaryInfo` when `visitSummaryInfo` is empty and returns `visit_type: "Hospital stay"`, `encounter_type`, and `is_admission_active`. The notes list works the same as for office visits, with one note per author and shift (H&P, progress, nursing, lactation, and so on).
+
 The AVS PDF dcsId lives at `avsInfo.avsSnapshots[0].dcsID`. When `avsSnapshots` is empty (refills, walk-ins, anesthesia events without a paper AVS), the visit has no PDF and `download_visit_avs_pdf` returns `status="no_pdf_available"`.
 
 ## `POST /mychartcn/api/visit-notes/GetVisitNotes`
