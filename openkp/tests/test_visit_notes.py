@@ -595,3 +595,85 @@ async def test_download_visit_avs_pdf_pdf_get_returns_4xx(tmp_path):
 
     assert result.status == "error"
     assert result.reason and "403" in result.reason
+
+
+def _inpatient_detail_payload() -> dict:
+    """GetVisitDetailsPast for a hospital stay.
+
+    Key set and the admissionSummaryInfo value formats are from a live
+    response (2026-11-26). Values are fabricated.
+    """
+    return {
+        "encounterType": "inpatient",
+        "csn": _FAKE_CSN,
+        "dat": "fake-dat-aaa",
+        "externalStatus": "NotExternalVisit",
+        "notesInfo": {"isAtLeastOneNoteShareable": True, "linkedAdmissionCSN": "", "notesReport": {}},
+        "avsInfo": {
+            "canShowDischargeInstr": False,
+            "isDischargeInstrEnabled": True,
+            "primaryAvs": {},
+            "additionalDocuments": [],
+            "hasShareableAvs": False,
+            "isAdmissionActive": True,
+            "useLegacyAvs": False,
+            "showPaperlessPrefLink": False,
+        },
+        "admissionSummaryInfo": {
+            "isBedsideActive": False,
+            "isFFUpdatesEnabled": False,
+            "admissionDate": "Jan 01, 2025",
+            "locationName": "SAMPLE-HOSPITAL",
+            "visitDetailsURL": "",
+        },
+        "visitSummaryInfo": {},
+        "externalDocUrl": "",
+        "orgID": "",
+        "isEncounterSensitive": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_fetch_visit_notes_inpatient_header_comes_from_admission_summary():
+    from openkp.scrapers.request import KaiserRequest
+
+    store = _make_store()
+    _, p = _patch_http([
+        httpx.Response(200, text=_csrf_html(_FAKE_CSRF_PD)),
+        httpx.Response(200, json=_inpatient_detail_payload()),
+        httpx.Response(200, json=_notes_payload(notes=[])),
+        httpx.Response(200, json=_avs_content_payload()),
+    ])
+    try:
+        response = await fetch_visit_notes(KaiserRequest(store), _FAKE_CSN)
+    finally:
+        p.stop()
+
+    assert response.visit_type == "Hospital stay"
+    assert response.encounter_date == "Jan 01, 2025"
+    assert response.department == "SAMPLE-HOSPITAL"
+    assert response.encounter_type == "inpatient"
+    assert response.is_admission_active is True
+    assert response.after_visit_summary is not None
+    assert response.after_visit_summary.iso == "2025-01-01"
+
+
+@pytest.mark.asyncio
+async def test_fetch_visit_notes_ambulatory_has_no_admission_flag():
+    from openkp.scrapers.request import KaiserRequest
+
+    store = _make_store()
+    _, p = _patch_http([
+        httpx.Response(200, text=_csrf_html(_FAKE_CSRF_PD)),
+        httpx.Response(200, json=_detail_payload(with_avs=False)),
+        httpx.Response(200, json=_notes_payload(notes=[])),
+        httpx.Response(200, json={"reportContent": "", "stylesheets": []}),
+    ])
+    try:
+        response = await fetch_visit_notes(KaiserRequest(store), _FAKE_CSN)
+    finally:
+        p.stop()
+
+    assert response.visit_type == "Office Visit"
+    assert response.encounter_type == "ambulatory"
+    assert response.is_admission_active is None
