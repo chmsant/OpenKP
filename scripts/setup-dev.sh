@@ -55,29 +55,52 @@ PY_VERSION="$("$PYTHON" -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])
 echo "Using $PYTHON (Python $PY_VERSION)"
 
 # --- 2. Create venv (idempotent) ----------------------------------------------
+#
+# Prefer uv when it's on PATH. A uv-managed CPython (what `uv python install`
+# puts on PATH as python3.1x) can't bootstrap pip through `python -m venv`, so
+# ensurepip fails and leaves a half-built venv behind. Set OPENKP_SETUP_NO_UV=1
+# to force the plain venv + pip path.
+
+USE_UV=0
+if [[ "${OPENKP_SETUP_NO_UV:-}" != "1" ]] && command -v uv >/dev/null 2>&1; then
+    USE_UV=1
+fi
+
+VENV_PY="$VENV_DIR/bin/python"
+
+if [[ -d "$VENV_DIR" && ! -x "$VENV_PY" ]]; then
+    echo "ERROR: $VENV_DIR exists but has no working Python (a previous setup" >&2
+    echo "probably failed partway). Move it aside and re-run this script." >&2
+    exit 1
+fi
 
 if [[ ! -d "$VENV_DIR" ]]; then
     echo "Creating venv at $VENV_DIR"
-    "$PYTHON" -m venv "$VENV_DIR"
+    if [[ "$USE_UV" == "1" ]]; then
+        uv venv --quiet --python "$PYTHON" "$VENV_DIR"
+    elif ! "$PYTHON" -m venv "$VENV_DIR"; then
+        echo "ERROR: '$PYTHON -m venv' failed. If this Python is managed by uv," >&2
+        echo "install uv on PATH and re-run, or use a python.org or Homebrew Python." >&2
+        exit 1
+    fi
 else
     echo "Venv already exists, reusing"
 fi
 
-# shellcheck disable=SC1091
-source "$VENV_DIR/bin/activate"
-
 # --- 3. Install package + dev deps --------------------------------------------
 
-echo "Upgrading pip"
-pip install --quiet --upgrade pip
-
 echo "Installing OpenKP in editable mode with [dev] extras"
-pip install --quiet -e "$PKG_DIR[dev]"
+if [[ "$USE_UV" == "1" ]]; then
+    uv pip install --quiet --python "$VENV_PY" -e "$PKG_DIR[dev]"
+else
+    "$VENV_PY" -m pip install --quiet --upgrade pip
+    "$VENV_PY" -m pip install --quiet -e "$PKG_DIR[dev]"
+fi
 
 # --- 4. Playwright Chromium ---------------------------------------------------
 
 echo "Installing Playwright Chromium (this can take a minute on first run)"
-playwright install chromium
+"$VENV_DIR/bin/playwright" install chromium
 
 # --- 5. Smoke tests -----------------------------------------------------------
 
@@ -92,7 +115,7 @@ fi
 echo "  openkp binary: $OPENKP_BIN"
 
 echo "  Running pytest"
-(cd "$PKG_DIR" && python -m pytest -q) || {
+(cd "$PKG_DIR" && "$VENV_PY" -m pytest -q) || {
     echo "  FAIL: pytest did not pass" >&2
     exit 1
 }
@@ -107,7 +130,7 @@ Next steps:
   1. Configure credentials:
        cp $PKG_DIR/.env.example $PKG_DIR/.env
        # Edit .env, set KP_USERNAME. Then store the password in the keychain:
-       python -c 'import keyring; keyring.set_password("openkp", "YOUR_USERNAME", "YOUR_PASSWORD")'
+       $VENV_PY -c 'import keyring; keyring.set_password("openkp", "YOUR_USERNAME", "YOUR_PASSWORD")'
 
   2. Wire Claude Desktop.
        Open ~/Library/Application\\ Support/Claude/claude_desktop_config.json
