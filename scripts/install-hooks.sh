@@ -58,7 +58,14 @@ fi
 # Scan the staged blobs, not the working tree, so what's checked is what's
 # committed. phi-scan.py prints the matched values, so keep its output out of
 # here. Exit 1 means a finding, anything else means the scan itself failed.
-(cd "$root" && python3 -I scripts/phi-scan.py --staged >/dev/null 2>&1)
+# Branches older than --staged (for example one cut from upstream main)
+# get the working-tree scan instead, with a note.
+scan_args=(--staged)
+if ! command grep -q -- '--staged' "$root/scripts/phi-scan.py" 2>/dev/null; then
+    scan_args=()
+    echo "pre-commit: this branch's phi-scan.py has no --staged, so the working tree was scanned."
+fi
+(cd "$root" && python3 -I scripts/phi-scan.py "${scan_args[@]+"${scan_args[@]}"}" >/dev/null 2>&1)
 rc=$?
 if [[ "$rc" == 1 ]]; then
     echo "pre-commit: phi-scan.py found something in the staged files. Run"
