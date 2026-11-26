@@ -4,8 +4,9 @@
 #
 # The hook runs two checks before every commit:
 #
-#   1. scripts/phi-scan.py over all tracked files (the same scan the release
-#      checklist asks for, just run every time instead of once).
+#   1. scripts/phi-scan.py --staged over the staged version of every tracked
+#      file (the scan the release checklist asks for, run on what is actually
+#      about to be committed).
 #   2. Staged added lines against your personal denylist at
 #      .git/info/phi-denylist. Put names, MRNs, member IDs, or anything else
 #      specific to you and your family there, one per line. Matching is
@@ -49,11 +50,24 @@ set -u
 root="$(git rev-parse --show-toplevel)"
 git_dir="$(git rev-parse --absolute-git-dir)"
 
-if ! python3 -I "$root/scripts/phi-scan.py" >/dev/null 2>&1; then
-    # phi-scan.py prints the matched values. Keep them out of this output and
-    # tell the person to run it themselves in a terminal.
-    echo "pre-commit: phi-scan.py found something. Run 'python3 scripts/phi-scan.py'"
-    echo "in your own terminal to see it, or use --no-verify if it's a false positive."
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "pre-commit: python3 not found, so the PHI scan couldn't run. Install it,"
+    echo "or use --no-verify if you've checked the commit yourself."
+    exit 1
+fi
+# Scan the staged blobs, not the working tree, so what's checked is what's
+# committed. phi-scan.py prints the matched values, so keep its output out of
+# here. Exit 1 means a finding, anything else means the scan itself failed.
+(cd "$root" && python3 -I scripts/phi-scan.py --staged >/dev/null 2>&1)
+rc=$?
+if [[ "$rc" == 1 ]]; then
+    echo "pre-commit: phi-scan.py found something in the staged files. Run"
+    echo "'python3 scripts/phi-scan.py --staged' in your own terminal to see it,"
+    echo "or use --no-verify if it's a false positive."
+    exit 1
+elif [[ "$rc" != 0 ]]; then
+    echo "pre-commit: phi-scan.py failed to run (exit $rc), so nothing was checked."
+    echo "Run 'python3 scripts/phi-scan.py --staged' to see why."
     exit 1
 fi
 

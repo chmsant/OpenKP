@@ -17,8 +17,9 @@ Usage:
 
     python3 scripts/phi-scan.py            # scan the working tree
     python3 scripts/phi-scan.py --history  # also scan every commit
+    python3 scripts/phi-scan.py --staged   # scan what's staged (the pre-commit hook)
 
-Exits non-zero if anything is found. Not wired into CI on purpose: a linter
+Exits 1 if anything is found, 2 if the scan itself failed. Not wired into CI on purpose: a linter
 that fails a release on a false positive gets disabled, and this is meant to
 be read by a human. Run it before publishing.
 
@@ -88,15 +89,27 @@ def tracked_files() -> list[str]:
     return [f for f in out.split("\n") if f and not f.endswith(SKIP_SUFFIXES)]
 
 
-def scan_tree() -> int:
+def _read_lines(path: str, staged: bool) -> list[str] | None:
+    """A file's lines from the working tree, or from the index when staged."""
+    if staged:
+        out = subprocess.run(["git", "show", f":{path}"], capture_output=True)
+        if out.returncode != 0:
+            return None  # deleted from the index, or a submodule
+        return out.stdout.decode("utf-8", errors="replace").splitlines(keepends=True)
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            return fh.readlines()
+    except OSError:
+        return None
+
+
+def scan_tree(staged: bool = False) -> int:
     findings = 0
     for path in tracked_files():
         if path.endswith(SELF_NAME):
             continue  # This file names the patterns it hunts for.
-        try:
-            with open(path, encoding="utf-8", errors="replace") as fh:
-                lines = fh.readlines()
-        except OSError:
+        lines = _read_lines(path, staged)
+        if lines is None:
             continue
 
         for lineno, line in enumerate(lines, 1):
@@ -143,10 +156,14 @@ def scan_history() -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--history", action="store_true", help="also scan all commits")
+    parser.add_argument(
+        "--staged", action="store_true",
+        help="scan the staged (index) version of each file instead of the working tree",
+    )
     args = parser.parse_args()
 
-    print("Scanning tracked files...")
-    findings = scan_tree()
+    print("Scanning staged files..." if args.staged else "Scanning tracked files...")
+    findings = scan_tree(staged=args.staged)
 
     if args.history:
         print("\nScanning history...")
@@ -161,4 +178,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Exception as exc:  # noqa: BLE001 - any crash must not read as a finding
+        print(f"phi-scan.py failed: {type(exc).__name__}", file=sys.stderr)
+        sys.exit(2)
