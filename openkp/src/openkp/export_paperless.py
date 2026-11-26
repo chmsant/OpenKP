@@ -48,6 +48,9 @@ import httpx
 from openkp.downloads_manifest import MANIFEST_FILENAME, read_manifest, sha256_file
 
 STATE_FILENAME = "paperless-export.json"
+# A pending upload whose task Paperless no longer knows about is retried after this.
+PENDING_TTL_SECONDS = 60 * 60
+LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
 SKIP_SUFFIXES = (".tmp", ".part", ".crdownload")
 TERMINAL_STATUSES = {"done", "duplicate", "failed"}
 
@@ -83,8 +86,9 @@ def load_state(path: Path) -> dict[str, dict[str, Any]]:
 
 def save_state(path: Path, state: dict[str, dict[str, Any]]) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
-    os.chmod(tmp, 0o600)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps(state, indent=2, sort_keys=True))
     tmp.replace(path)
 
 
@@ -92,17 +96,41 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _age_seconds(entry: dict[str, Any]) -> float:
+    try:
+        then = datetime.fromisoformat(str(entry.get("updated_at")))
+    except ValueError:
+        return float("inf")
+    return (datetime.now(timezone.utc) - then).total_seconds()
+
+
+def _label(c: Candidate, show_names: bool) -> str:
+    """What to print for a file. Names come from Kaiser titles (PHI), so by
+    default print a hash prefix and the kind instead."""
+    return f"{c.path.name}  [{c.kind}]" if show_names else f"{c.sha256[:12]}  [{c.kind}]"
+
+
 # --- finding files -----------------------------------------------------------
 
 
-def find_candidates(download_dir: Path, since: datetime | None) -> list[Candidate]:
-    """Every exportable file in the downloads dir, oldest first."""
+def find_candidates(
+    download_dir: Path, since: datetime | None, include_unlisted: bool = False
+) -> list[Candidate]:
+    """Exportable files in the downloads dir, oldest first.
+
+    By default only files an OpenKP download tool recorded in the manifest,
+    with bytes that still match the recorded hash. Anything else dropped in
+    the folder is ignored unless `include_unlisted`. Symlinks are always
+    skipped so a link can't pull in some other file on the machine.
+    """
     if not download_dir.is_dir():
         return []
     manifest = read_manifest(download_dir)
     out: list[Candidate] = []
-    for path in sorted(download_dir.iterdir(), key=lambda p: p.stat().st_mtime):
-        if not path.is_file() or path.name.startswith(".") or path.name == MANIFEST_FILENAME:
+    for path in sorted(download_dir.iterdir(), key=lambda p: p.lstat().st_mtime):
+        if path.is_symlink() or not path.is_file():
+            continue
+        if path.name.startswith(".") or path.name == MANIFEST_FILENAME:
             continue
         if path.name.endswith(SKIP_SUFFIXES) or path.stat().st_size == 0:
             continue
@@ -111,11 +139,14 @@ def find_candidates(download_dir: Path, since: datetime | None) -> list[Candidat
             if modified < since:
                 continue
         entry = manifest.get(path.name, {})
+        digest = sha256_file(path)
+        if not include_unlisted and entry.get("sha256") != digest:
+            continue
         title = str(entry.get("title") or "").strip() or path.stem
         out.append(
             Candidate(
                 path=path,
-                sha256=sha256_file(path),
+                sha256=digest,
                 title=title,
                 kind=str(entry.get("kind") or "unknown"),
             )
@@ -176,7 +207,7 @@ class Paperless:
         payload = response.json()
         tasks = payload if isinstance(payload, list) else payload.get("results", [])
         if not tasks:
-            return "PENDING", None, ""
+            return "UNKNOWN", None, ""
         task = tasks[0]
         doc = task.get("related_document")
         try:
@@ -236,7 +267,16 @@ def refresh_pending(
     while True:
         pending = [e for e in state.values() if e.get("status") == "pending" and e.get("task_id")]
         for entry in pending:
-            _apply_task(entry, *api.task_status(entry["task_id"]))
+            status, doc_id, result = api.task_status(entry["task_id"])
+            if status == "UNKNOWN":
+                if _age_seconds(entry) > PENDING_TTL_SECONDS:
+                    # Paperless doesn't know this task (expired, or a
+                    # different instance). Send it again next run. Paperless
+                    # rejects a true duplicate by checksum, so that's safe.
+                    entry["status"] = "retry"
+                    entry["updated_at"] = _now()
+                continue
+            _apply_task(entry, status, doc_id, result)
         still = any(e.get("status") == "pending" for e in state.values())
         if not still or time.monotonic() >= deadline:
             return
@@ -249,14 +289,10 @@ def run(args: argparse.Namespace, transport: httpx.BaseTransport | None = None) 
     ).expanduser()
     download_dir = data_dir / "downloads"
     state_path = data_dir / STATE_FILENAME
-    since = (
-        datetime.strptime(args.since, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-        if args.since
-        else None
-    )
+    since = args.since
 
     state = load_state(state_path)
-    candidates = find_candidates(download_dir, since)
+    candidates = find_candidates(download_dir, since, include_unlisted=args.include_unlisted)
     if args.retry_failed:
         for entry in state.values():
             if entry.get("status") == "failed":
@@ -279,7 +315,7 @@ def run(args: argparse.Namespace, transport: httpx.BaseTransport | None = None) 
     if args.dry_run and not (url and token):
         print(f"Dry run. {len(todo)} file(s) would be uploaded (no Paperless lookups):")
         for c in todo:
-            print(f"  {c.path.name}  [{c.kind}]")
+            print(f"  {_label(c, args.show_names)}")
         return EXIT_OK
 
     if not url or not token:
@@ -287,8 +323,13 @@ def run(args: argparse.Namespace, transport: httpx.BaseTransport | None = None) 
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         raise UsageError("PAPERLESS_URL must look like https://host[:port].")
-    if parsed.scheme == "http" and parsed.hostname not in ("localhost", "127.0.0.1"):
-        print("Warning: PAPERLESS_URL is plain http, so the token travels unencrypted.",
+    if parsed.scheme == "http" and parsed.hostname not in LOOPBACK_HOSTS:
+        if not args.allow_insecure_http:
+            raise UsageError(
+                "PAPERLESS_URL is plain http, so the token and your documents would travel "
+                "unencrypted. Use https, or pass --allow-insecure-http if you really mean it."
+            )
+        print("Warning: plain http. The token and documents travel unencrypted.",
               file=sys.stderr)
 
     api = Paperless(url, token, transport=transport)
@@ -304,7 +345,7 @@ def run(args: argparse.Namespace, transport: httpx.BaseTransport | None = None) 
         if args.dry_run:
             print(f"Dry run. {len(todo)} file(s) would be uploaded with the given metadata:")
             for c in todo:
-                print(f"  {c.path.name}  [{c.kind}]")
+                print(f"  {_label(c, args.show_names)}")
             return EXIT_OK
 
         failures = 0
@@ -313,12 +354,12 @@ def run(args: argparse.Namespace, transport: httpx.BaseTransport | None = None) 
             try:
                 entry["task_id"] = api.upload(c, fields)
                 entry["status"] = "pending"
-                print(f"  queued   {c.path.name}")
+                print(f"  queued   {_label(c, args.show_names)}")
             except RuntimeError as exc:
                 entry["status"] = "failed"
                 entry["error"] = str(exc)
                 failures += 1
-                print(f"  FAILED   {c.path.name}: {exc}", file=sys.stderr)
+                print(f"  FAILED   {_label(c, args.show_names)}: {exc}", file=sys.stderr)
             state[c.sha256] = entry
             save_state(state_path, state)
 
@@ -347,12 +388,25 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--tag", action="append", default=[], help="existing Paperless tag name, repeatable")
     p.add_argument("--correspondent", help="existing Paperless correspondent name")
     p.add_argument("--document-type", help="existing Paperless document type name")
-    p.add_argument("--since", help="only files modified on or after YYYY-MM-DD")
+    p.add_argument("--since", type=_parse_since, help="only files modified on or after YYYY-MM-DD")
     p.add_argument("--limit", type=int, default=0, help="upload at most N files this run")
     p.add_argument("--wait", type=float, default=30.0,
                    help="seconds to wait for Paperless to finish consuming (default 30)")
     p.add_argument("--retry-failed", action="store_true", help="retry files that failed before")
+    p.add_argument("--include-unlisted", action="store_true",
+                   help="also export files in downloads/ that no OpenKP download tool recorded")
+    p.add_argument("--show-names", action="store_true",
+                   help="print file names (Kaiser titles) instead of hash prefixes")
+    p.add_argument("--allow-insecure-http", action="store_true",
+                   help="allow a plain-http PAPERLESS_URL that isn't localhost")
     return p
+
+
+def _parse_since(value: str) -> datetime:
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except ValueError:
+        raise argparse.ArgumentTypeError("use YYYY-MM-DD") from None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -366,6 +420,11 @@ def main(argv: list[str] | None = None) -> int:
         # httpx exceptions carry the URL, never headers. Print the class and
         # message, not a repr of the request.
         print(f"Error: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return EXIT_FAILURES
+    except (ValueError, KeyError, TypeError) as exc:
+        # An unexpected response shape (HTML error page, missing field).
+        # Don't print the message: it could quote response content.
+        print(f"Error: unexpected response from Paperless ({type(exc).__name__}).", file=sys.stderr)
         return EXIT_FAILURES
 
 

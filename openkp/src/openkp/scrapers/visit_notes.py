@@ -42,7 +42,7 @@ from typing import Any
 from bs4 import BeautifulSoup
 from pydantic import BaseModel, Field
 
-from openkp.downloads_manifest import record_download
+from openkp.downloads_manifest import save_download
 from openkp.scrapers.csrf import fetch_csrf_token
 from openkp.scrapers.request import KaiserRequest
 
@@ -334,9 +334,9 @@ async def download_visit_avs_pdf(
     safe = _safe_filename(display_name)
     if not safe.lower().endswith(".pdf"):
         safe += ".pdf"
-    out_path = out_dir / safe
-    out_path.write_bytes(pdf_bytes)
-    record_download(out_path, kind="visit_avs_pdf", source_id=csn, title=display_name)
+    out_path = save_download(
+        out_dir, safe, pdf_bytes, kind="visit_avs_pdf", source_id=csn, title=display_name
+    )
 
     return AvsPdfDownload(
         status="downloaded",

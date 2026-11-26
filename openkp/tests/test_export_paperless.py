@@ -103,7 +103,8 @@ def test_candidates_skip_manifest_dotfiles_partials_and_empty(data_dir: Path):
 
 def test_title_falls_back_to_filename(data_dir: Path):
     _add(data_dir, "Visit Summary.pdf", b"1")
-    (c,) = ep.find_candidates(data_dir / "downloads", None)
+    assert ep.find_candidates(data_dir / "downloads", None) == []  # not in the manifest
+    (c,) = ep.find_candidates(data_dir / "downloads", None, include_unlisted=True)
     assert c.title == "Visit Summary"
     assert c.kind == "unknown"
 
@@ -114,6 +115,10 @@ def test_dry_run_without_credentials_makes_no_requests(data_dir: Path, monkeypat
     fake = FakePaperless()
     assert _run(data_dir, fake, "--dry-run") == 0
     assert fake.requests == []
+    out = capsys.readouterr().out
+    assert "a.pdf" not in out  # names are PHI-bearing, hidden by default
+    assert "[lab_pdf]" in out
+    assert _run(data_dir, fake, "--dry-run", "--show-names") == 0
     assert "a.pdf" in capsys.readouterr().out
     assert not (data_dir / ep.STATE_FILENAME).exists()
 
@@ -233,10 +238,97 @@ def test_missing_credentials_is_usage_error(data_dir: Path, monkeypatch):
     assert ep.main(["--data-dir", str(data_dir)]) == ep.EXIT_USAGE
 
 
-def test_plain_http_warns(data_dir: Path, monkeypatch, capsys):
+def test_plain_http_is_refused_without_flag(data_dir: Path, monkeypatch):
     monkeypatch.setenv("PAPERLESS_URL", "http://paperless.test")
-    _run(data_dir, FakePaperless())
+    _add(data_dir, "a.pdf", b"1", title="A")
+    fake = FakePaperless()
+    with pytest.raises(ep.UsageError, match="plain http"):
+        _run(data_dir, fake)
+    assert fake.requests == []
+
+
+def test_plain_http_allowed_with_flag_warns(data_dir: Path, monkeypatch, capsys):
+    monkeypatch.setenv("PAPERLESS_URL", "http://paperless.test")
+    _run(data_dir, FakePaperless(), "--allow-insecure-http")
     assert "plain http" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("host", ["localhost", "127.0.0.1", "[::1]"])
+def test_plain_http_to_loopback_is_fine(data_dir: Path, monkeypatch, host):
+    monkeypatch.setenv("PAPERLESS_URL", f"http://{host}:8000")
+    assert _run(data_dir, FakePaperless()) == 0
+
+
+def test_symlinks_and_tampered_files_are_skipped(data_dir: Path, tmp_path: Path):
+    outside = tmp_path / "outside-secret.txt"
+    outside.write_text("not a kaiser file")
+    (data_dir / "downloads" / "link.pdf").symlink_to(outside)
+    tampered = _add(data_dir, "t.pdf", b"original", title="T")
+    tampered.write_bytes(b"changed after download")
+    assert ep.find_candidates(data_dir / "downloads", None) == []
+    names = [c.path.name for c in ep.find_candidates(data_dir / "downloads", None, include_unlisted=True)]
+    assert names == ["t.pdf"]  # unlisted mode still never follows symlinks
+
+
+def test_unknown_pending_task_is_retried_after_ttl(data_dir: Path):
+    _add(data_dir, "a.pdf", b"1", title="A")
+    _run(data_dir, FakePaperless(task_status="STARTED"))
+    state = _state(data_dir)
+    (sha,) = state
+    state[sha]["updated_at"] = "2000-01-01T00:00:00+00:00"
+    (data_dir / ep.STATE_FILENAME).write_text(json.dumps(state))
+
+    class Forgetful(FakePaperless):
+        def __call__(self, request):
+            if request.url.path == "/api/tasks/":
+                self.requests.append(request)
+                return httpx.Response(200, json=[])
+            return super().__call__(request)
+
+    _run(data_dir, Forgetful())
+    assert _state(data_dir)[sha]["status"] == "retry"
+    again = FakePaperless()
+    _run(data_dir, again)
+    assert len(again.uploads) == 1
+
+
+def test_fresh_unknown_pending_task_stays_pending(data_dir: Path):
+    _add(data_dir, "a.pdf", b"1", title="A")
+
+    class Forgetful(FakePaperless):
+        def __call__(self, request):
+            if request.url.path == "/api/tasks/":
+                return httpx.Response(200, json=[])
+            return super().__call__(request)
+
+    _run(data_dir, Forgetful())
+    (entry,) = _state(data_dir).values()
+    assert entry["status"] == "pending"
+
+
+def test_bad_since_is_a_clean_usage_error(data_dir: Path):
+    with pytest.raises(SystemExit) as exc:
+        ep.main(["--data-dir", str(data_dir), "--since", "yesterday"])
+    assert exc.value.code == 2
+
+
+def test_html_error_page_is_reported_without_content(data_dir: Path, monkeypatch, capsys):
+    _add(data_dir, "a.pdf", b"1", title="A")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<html>Secret title login page</html>")
+
+    real_init = ep.Paperless.__init__
+
+    def patched(self, base_url, token, transport=None):
+        real_init(self, base_url, token, transport=httpx.MockTransport(handler))
+
+    monkeypatch.setattr(ep.Paperless, "__init__", patched)
+    assert ep.main(["--data-dir", str(data_dir), "--wait", "0", "--tag", "Medical"]) == ep.EXIT_FAILURES
+    err = capsys.readouterr().err
+    assert "unexpected response" in err
+    assert "Secret" not in err
+
 
 
 @pytest.mark.parametrize("raw, expected", [('"abc-123"', "abc-123"), ("abc-123", "abc-123"),
