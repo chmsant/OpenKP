@@ -108,7 +108,23 @@ async def login_interactive(data_dir: Path, username: str, password: str) -> Kai
     """
     profile_dir = _profile_dir(data_dir)
     profile_dir.mkdir(parents=True, exist_ok=True)
-    _disable_password_saving(profile_dir)
+    interactive = not password
+    if not _disable_password_saving(profile_dir) and interactive:
+        # The whole point of interactive mode is that the password never
+        # lands on disk. If we can't turn saving off, don't open the window.
+        raise RuntimeError(
+            "Could not turn off password saving in OpenKP's browser profile "
+            f"({profile_dir}). Interactive login was not started."
+        )
+    if interactive:
+        saved = _count_saved_passwords(profile_dir)
+        if saved:
+            raise RuntimeError(
+                f"OpenKP's browser profile ({profile_dir}) already holds {saved} saved "
+                "password(s), probably from stored-password mode. Interactive login "
+                "won't run on top of them. Move the profile folder aside (you'll sign "
+                "in again) and retry."
+            )
 
     async with async_playwright() as pw:
         context = await pw.chromium.launch_persistent_context(
@@ -180,12 +196,16 @@ async def _fill_ping_form(page: Any, username: str, password: str) -> bool:
     return True
 
 
-def _disable_password_saving(profile_dir: Path) -> None:
+def _disable_password_saving(profile_dir: Path) -> bool:
     """Turn off Chromium's password manager in the persistent profile.
 
     Without this, a password typed into Kaiser's form can be offered for
     saving and land in the profile's Login Data file. Merges into any
-    existing Preferences. Best-effort: a failure is logged, never raised.
+    existing Preferences and writes atomically. Returns False on failure
+    (logged, not raised). Interactive mode treats False as fatal.
+
+    An unreadable Preferences file is a failure, not something to overwrite:
+    Chromium would otherwise lose every other setting in it.
     """
     prefs_path = profile_dir / "Default" / "Preferences"
     try:
@@ -201,9 +221,36 @@ def _disable_password_saving(profile_dir: Path) -> None:
         profile["password_manager_enabled"] = False
         prefs["profile"] = profile
         prefs_path.parent.mkdir(parents=True, exist_ok=True)
-        prefs_path.write_text(json.dumps(prefs), encoding="utf-8")
+        tmp = prefs_path.with_name(prefs_path.name + ".openkp-tmp")
+        tmp.write_text(json.dumps(prefs), encoding="utf-8")
+        tmp.replace(prefs_path)
+        return True
     except (OSError, ValueError) as exc:
         logger.warning("Could not disable password saving in the browser profile (%s)", type(exc).__name__)
+        return False
+
+
+def _count_saved_passwords(profile_dir: Path) -> int:
+    """How many logins Chromium has saved in this profile. 0 if none or unknown.
+
+    Reads the `logins` table of `Default/Login Data` read-only. Never reads
+    or returns the stored values.
+    """
+    import sqlite3
+
+    db = profile_dir / "Default" / "Login Data"
+    if not db.exists():
+        return 0
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        try:
+            row = conn.execute("SELECT COUNT(*) FROM logins").fetchone()
+        finally:
+            conn.close()
+        return int(row[0]) if row else 0
+    except sqlite3.Error as exc:
+        logger.warning("Could not read saved-password count (%s)", type(exc).__name__)
+        return 0
 
 
 def _profile_dir(data_dir: Path) -> Path:

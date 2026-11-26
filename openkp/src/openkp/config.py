@@ -57,6 +57,9 @@ def load_config() -> Config:
                 INTERACTIVE_LOGIN_ENV,
             )
         password = ""
+        # Keep it out of the process environment too, so the Chromium child
+        # process doesn't inherit it.
+        os.environ.pop("KP_PASSWORD", None)
     else:
         password = os.getenv("KP_PASSWORD", "").strip()
         if not password:

@@ -139,7 +139,57 @@ def test_disable_password_saving_survives_corrupt_prefs(tmp_path: Path):
     prefs_path = tmp_path / "Default" / "Preferences"
     prefs_path.parent.mkdir(parents=True)
     prefs_path.write_text("{not json")
-    auth._disable_password_saving(tmp_path)  # must not raise
+    assert auth._disable_password_saving(tmp_path) is False
+    assert prefs_path.read_text() == "{not json"  # left alone, not clobbered
+
+
+def test_interactive_mode_pops_kp_password_from_environ(monkeypatch):
+    import os
+
+    monkeypatch.setenv("OPENKP_INTERACTIVE_LOGIN", "1")
+    monkeypatch.setenv("KP_PASSWORD", "hunter2")
+    load_config()
+    assert "KP_PASSWORD" not in os.environ
+
+
+def _make_login_db(profile_dir: Path, rows: int) -> None:
+    import sqlite3
+
+    db = profile_dir / "Default" / "Login Data"
+    db.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE logins (origin_url TEXT, password_value BLOB)")
+    for i in range(rows):
+        conn.execute("INSERT INTO logins VALUES (?, ?)", (f"https://x{i}", b"secret"))
+    conn.commit()
+    conn.close()
+
+
+def test_count_saved_passwords(tmp_path: Path):
+    assert auth._count_saved_passwords(tmp_path) == 0
+    _make_login_db(tmp_path, 2)
+    assert auth._count_saved_passwords(tmp_path) == 2
+
+
+class _NeverLaunch:
+    """async_playwright stand-in that fails the test if a browser launches."""
+
+    def __call__(self):
+        raise AssertionError("browser launched")
+
+
+async def test_interactive_login_refuses_when_prefs_unwritable(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(auth, "_disable_password_saving", lambda d: False)
+    monkeypatch.setattr(auth, "async_playwright", _NeverLaunch())
+    with pytest.raises(RuntimeError, match="password saving"):
+        await auth.login_interactive(tmp_path, "", "")
+
+
+async def test_interactive_login_refuses_with_existing_saved_passwords(monkeypatch, tmp_path: Path):
+    _make_login_db(tmp_path / "chromium-profile", 1)
+    monkeypatch.setattr(auth, "async_playwright", _NeverLaunch())
+    with pytest.raises(RuntimeError, match="1 saved"):
+        await auth.login_interactive(tmp_path, "", "")
 
 
 async def test_login_launches_chromium_with_password_saving_off(monkeypatch, tmp_path: Path):
