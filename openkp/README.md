@@ -164,7 +164,13 @@ Store each password in the keyring under its own username (step 2), then give ea
 
 `OPENKP_PROFILE` is just a label. `whoami` reports it so you can confirm which account a server is using. Each server's first `session_check` opens its own login window. Sign in as that account.
 
-Values in the `env` block take precedence over anything in `openkp/.env`, so leave `KP_USERNAME` and `OPENKP_DATA_DIR` out of `.env` when you run more than one profile.
+Values in the `env` block take precedence over anything in `openkp/.env`, but only for the keys the block sets. Every other key in `.env` reaches every profile. So when you run more than one profile, keep per-person settings out of `.env`:
+
+- `KP_USERNAME` and `OPENKP_DATA_DIR`
+- `KP_PASSWORD`. Left in `.env`, it gets typed into every profile's sign-in, including the other person's. Store each password in the keyring instead.
+- `OPENKP_INTERACTIVE_LOGIN`, if only some profiles use it
+
+Put them in each server's `env` block. `.env` is fine for settings everyone shares, like `OPENKP_LOG_LEVEL`.
 
 ## First things to try
 
