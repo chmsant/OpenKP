@@ -133,6 +133,39 @@ Fully quit Claude Desktop (Cmd+Q, not just close-window) and relaunch. In a new 
 
 The first time, a Chromium window pops up showing the kp.org login. Sign in (including MFA). When kp.org's home page loads, OpenKP captures the session and the window closes automatically. Subsequent calls are silent.
 
+### More than one Kaiser account on one machine
+
+Run one OpenKP server per kp.org account. Each one gets its own data directory, so its session, browser profile, audit log, downloads, and debug dumps never mix with another account's. Claude sees each server as a separate set of tools (`openkp-alex` vs `openkp-sam`), so it can't call one account's tools against the other's session.
+
+Store each password in the keyring under its own username (step 2), then give each server its own env block:
+
+```json
+{
+  "mcpServers": {
+    "openkp-alex": {
+      "command": "/Users/<YOUR_USERNAME>/OpenKP/openkp/.venv/bin/openkp",
+      "env": {
+        "KP_USERNAME": "alex@example.com",
+        "OPENKP_DATA_DIR": "/Users/<YOUR_USERNAME>/.openkp-alex",
+        "OPENKP_PROFILE": "alex"
+      }
+    },
+    "openkp-sam": {
+      "command": "/Users/<YOUR_USERNAME>/OpenKP/openkp/.venv/bin/openkp",
+      "env": {
+        "KP_USERNAME": "sam@example.com",
+        "OPENKP_DATA_DIR": "/Users/<YOUR_USERNAME>/.openkp-sam",
+        "OPENKP_PROFILE": "sam"
+      }
+    }
+  }
+}
+```
+
+`OPENKP_PROFILE` is just a label. `whoami` reports it so you can confirm which account a server is using. Each server's first `session_check` opens its own login window. Sign in as that account.
+
+Values in the `env` block take precedence over anything in `openkp/.env`, so leave `KP_USERNAME` and `OPENKP_DATA_DIR` out of `.env` when you run more than one profile.
+
 ## First things to try
 
 Once `session_check` returns `status: alive`, try these prompts in Claude Desktop. Lead with the questions that show what OpenKP makes possible — surface insight your patient portal isn't built to give you:
