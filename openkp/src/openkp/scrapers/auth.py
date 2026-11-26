@@ -43,6 +43,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from playwright.async_api import async_playwright
 
 logger = logging.getLogger(__name__)
@@ -118,6 +119,12 @@ async def login_interactive(data_dir: Path, username: str, password: str) -> Kai
         )
     if interactive:
         saved = _count_saved_passwords(profile_dir)
+        if saved < 0:
+            raise RuntimeError(
+                f"Couldn't check OpenKP's browser profile ({profile_dir}) for saved "
+                "passwords. Close any OpenKP browser window that's still open and retry. "
+                "If it keeps happening, move the profile folder aside (you'll sign in again)."
+            )
         if saved:
             raise RuntimeError(
                 f"OpenKP's browser profile ({profile_dir}) already holds {saved} saved "
@@ -179,13 +186,22 @@ async def _fill_ping_form(page: Any, username: str, password: str) -> bool:
     it, never touch the password field, never submit. The person types the
     password and submits it themselves.
     """
-    await page.wait_for_selector('input[name="pf.username"]', state="visible", timeout=30_000)
     if not password:
+        # The person signs in by hand, so a missing username field (say, a
+        # password-only step for a remembered user) isn't an error. Skip the
+        # prefill and let the caller's long wait cover the sign-in.
         if username:
-            await page.fill('input[name="pf.username"]', username)
+            try:
+                await page.wait_for_selector(
+                    'input[name="pf.username"]', state="visible", timeout=30_000
+                )
+                await page.fill('input[name="pf.username"]', username)
+            except PlaywrightTimeoutError:
+                logger.info("Interactive login: no username field, skipping the prefill")
         logger.info("Interactive login: sign in yourself in the browser window")
         return False
 
+    await page.wait_for_selector('input[name="pf.username"]', state="visible", timeout=30_000)
     logger.info("On Ping login form, autofilling credentials")
     await page.fill('input[name="pf.username"]', username)
     await page.fill('input[name="pf.pass"]', password)
@@ -230,27 +246,39 @@ def _disable_password_saving(profile_dir: Path) -> bool:
         return False
 
 
-def _count_saved_passwords(profile_dir: Path) -> int:
-    """How many logins Chromium has saved in this profile. 0 if none or unknown.
+# Chromium keeps saved logins in one or both of these, depending on version
+# and whether account-scoped storage is on.
+LOGIN_DATA_FILES = ("Login Data", "Login Data For Account")
 
-    Reads the `logins` table of `Default/Login Data` read-only. Never reads
-    or returns the stored values.
+
+def _count_saved_passwords(profile_dir: Path) -> int:
+    """How many logins Chromium has saved in this profile.
+
+    0 if none. -1 if a login database exists but can't be read (locked by
+    a running Chromium, corrupt, or an unexpected schema). Interactive mode
+    treats -1 as fatal, so an unreadable store never counts as empty.
+
+    Reads the `logins` tables read-only. Never reads or returns the stored
+    values.
     """
     import sqlite3
 
-    db = profile_dir / "Default" / "Login Data"
-    if not db.exists():
-        return 0
-    try:
-        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    total = 0
+    for name in LOGIN_DATA_FILES:
+        db = profile_dir / "Default" / name
+        if not db.exists():
+            continue
         try:
-            row = conn.execute("SELECT COUNT(*) FROM logins").fetchone()
-        finally:
-            conn.close()
-        return int(row[0]) if row else 0
-    except sqlite3.Error as exc:
-        logger.warning("Could not read saved-password count (%s)", type(exc).__name__)
-        return 0
+            conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+            try:
+                row = conn.execute("SELECT COUNT(*) FROM logins").fetchone()
+            finally:
+                conn.close()
+        except sqlite3.Error as exc:
+            logger.warning("Could not read saved-password count (%s)", type(exc).__name__)
+            return -1
+        total += int(row[0]) if row else 0
+    return total
 
 
 def _profile_dir(data_dir: Path) -> Path:

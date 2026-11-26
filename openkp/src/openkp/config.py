@@ -25,6 +25,10 @@ logger = logging.getLogger(__name__)
 KEYRING_SERVICE = "openkp"
 INTERACTIVE_LOGIN_ENV = "OPENKP_INTERACTIVE_LOGIN"
 
+# load_config runs on every tool call, and load_dotenv puts a KP_PASSWORD
+# from .env back each time, so warn about it once per process.
+_warned_ignored_password = False
+
 
 @dataclass(frozen=True)
 class Config:
@@ -51,7 +55,9 @@ def load_config() -> Config:
 
     if interactive_login:
         # Never read a stored password in this mode, not even one left in .env.
-        if os.getenv("KP_PASSWORD", "").strip():
+        global _warned_ignored_password
+        if os.getenv("KP_PASSWORD", "").strip() and not _warned_ignored_password:
+            _warned_ignored_password = True
             logger.warning(
                 "%s is on, so KP_PASSWORD is ignored. Remove it from .env.",
                 INTERACTIVE_LOGIN_ENV,

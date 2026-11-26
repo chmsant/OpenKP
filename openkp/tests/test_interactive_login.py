@@ -50,6 +50,9 @@ def test_interactive_mode_needs_no_username(monkeypatch):
 
 
 def test_interactive_mode_ignores_kp_password(monkeypatch, caplog):
+    import openkp.config as config_mod
+
+    monkeypatch.setattr(config_mod, "_warned_ignored_password", False)
     monkeypatch.setenv("OPENKP_INTERACTIVE_LOGIN", "yes")
     monkeypatch.setenv("KP_PASSWORD", "hunter2")
     _keyring_must_not_be_called(monkeypatch)
@@ -57,6 +60,18 @@ def test_interactive_mode_ignores_kp_password(monkeypatch, caplog):
     assert cfg.password == ""
     assert "hunter2" not in caplog.text
     assert "KP_PASSWORD is ignored" in caplog.text
+
+
+def test_ignored_password_warning_is_logged_once(monkeypatch, caplog):
+    import openkp.config as config_mod
+
+    monkeypatch.setattr(config_mod, "_warned_ignored_password", False)
+    monkeypatch.setenv("OPENKP_INTERACTIVE_LOGIN", "1")
+    _keyring_must_not_be_called(monkeypatch)
+    for _ in range(3):
+        monkeypatch.setenv("KP_PASSWORD", "hunter2")  # what load_dotenv does each call
+        load_config()
+    assert caplog.text.count("KP_PASSWORD is ignored") == 1
 
 
 @pytest.mark.parametrize("value", ["", "0", "false", "no", "off", "maybe"])
@@ -115,6 +130,31 @@ async def test_fill_ping_form_interactive_without_username_fills_nothing():
     assert [c for c in page.calls if c[0] != "wait"] == []
 
 
+async def test_fill_ping_form_interactive_tolerates_missing_username_field():
+    """A password-only step (no username field) must not fail interactive login."""
+    from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+
+    class _NoUsernamePage(_FakePage):
+        async def wait_for_selector(self, selector, **kw):
+            raise PlaywrightTimeoutError("no field")
+
+    page = _NoUsernamePage()
+    submitted = await auth._fill_ping_form(page, "a@example.com", "")
+    assert submitted is False
+    assert page.calls == []
+
+
+async def test_fill_ping_form_stored_mode_still_needs_username_field():
+    from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+
+    class _NoUsernamePage(_FakePage):
+        async def wait_for_selector(self, selector, **kw):
+            raise PlaywrightTimeoutError("no field")
+
+    with pytest.raises(PlaywrightTimeoutError):
+        await auth._fill_ping_form(_NoUsernamePage(), "a@example.com", "pw")
+
+
 # --- browser profile ---
 
 
@@ -152,10 +192,10 @@ def test_interactive_mode_pops_kp_password_from_environ(monkeypatch):
     assert "KP_PASSWORD" not in os.environ
 
 
-def _make_login_db(profile_dir: Path, rows: int) -> None:
+def _make_login_db(profile_dir: Path, rows: int, name: str = "Login Data") -> None:
     import sqlite3
 
-    db = profile_dir / "Default" / "Login Data"
+    db = profile_dir / "Default" / name
     db.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db)
     conn.execute("CREATE TABLE logins (origin_url TEXT, password_value BLOB)")
@@ -169,6 +209,27 @@ def test_count_saved_passwords(tmp_path: Path):
     assert auth._count_saved_passwords(tmp_path) == 0
     _make_login_db(tmp_path, 2)
     assert auth._count_saved_passwords(tmp_path) == 2
+
+
+def test_count_saved_passwords_includes_account_store(tmp_path: Path):
+    _make_login_db(tmp_path, 1, "Login Data For Account")
+    assert auth._count_saved_passwords(tmp_path) == 1
+    _make_login_db(tmp_path, 2)
+    assert auth._count_saved_passwords(tmp_path) == 3
+
+
+def test_count_saved_passwords_unreadable_store_is_not_empty(tmp_path: Path):
+    db = tmp_path / "Default" / "Login Data"
+    db.parent.mkdir(parents=True)
+    db.write_bytes(b"not a sqlite database at all" * 10)
+    assert auth._count_saved_passwords(tmp_path) == -1
+
+
+async def test_interactive_login_refuses_when_saved_passwords_unreadable(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(auth, "_count_saved_passwords", lambda d: -1)
+    monkeypatch.setattr(auth, "async_playwright", _NeverLaunch())
+    with pytest.raises(RuntimeError, match="Couldn't check"):
+        await auth.login_interactive(tmp_path, "", "")
 
 
 class _NeverLaunch:
