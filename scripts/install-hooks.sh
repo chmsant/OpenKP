@@ -49,23 +49,35 @@ set -u
 root="$(git rev-parse --show-toplevel)"
 git_dir="$(git rev-parse --absolute-git-dir)"
 
-if ! scan_out="$(python3 -I "$root/scripts/phi-scan.py" 2>&1)"; then
-    printf '%s\n' "$scan_out"
-    echo "pre-commit: phi-scan.py found something. Fix it, or use --no-verify if it's a false positive."
+if ! python3 -I "$root/scripts/phi-scan.py" >/dev/null 2>&1; then
+    # phi-scan.py prints the matched values. Keep them out of this output and
+    # tell the person to run it themselves in a terminal.
+    echo "pre-commit: phi-scan.py found something. Run 'python3 scripts/phi-scan.py'"
+    echo "in your own terminal to see it, or use --no-verify if it's a false positive."
     exit 1
 fi
 
 deny="$git_dir/info/phi-denylist"
 if [[ -f "$deny" ]]; then
-    patterns="$(grep -vE '^[[:space:]]*(#|$)' "$deny" || true)"
+    # Drop comments and blank lines. An empty pattern would match everything.
+    patterns="$(command grep -vE '^[[:space:]]*(#|$)' "$deny" || true)"
     if [[ -n "$patterns" ]]; then
-        hits="$(git diff --cached -U0 --no-color \
-            | grep -E '^\+' | grep -vE '^\+\+\+ ' \
-            | grep -Fwi -f <(printf '%s\n' "$patterns") || true)"
-        if [[ -n "$hits" ]]; then
-            echo "pre-commit: staged lines match your PHI denylist ($deny):"
-            printf '%s\n' "$hits" | cut -c1-160
-            echo "Scrub them, or use --no-verify if it's a false positive."
+        # Report file names and counts only, never the matching text. A commit
+        # run from an AI coding session would otherwise copy the PHI it just
+        # caught into the session transcript.
+        found=0
+        while IFS= read -r -d '' file; do
+            n="$(git diff --cached -U0 --no-color -- "$file" \
+                | command grep -E '^\+' | command grep -vE '^\+\+\+ ' \
+                | command grep -Fwic -f <(printf '%s\n' "$patterns") || true)"
+            if [[ "${n:-0}" -gt 0 ]]; then
+                [[ "$found" == 0 ]] && echo "pre-commit: staged lines match your PHI denylist:"
+                echo "  $file: $n line(s)"
+                found=1
+            fi
+        done < <(git diff --cached --name-only -z --diff-filter=ACMR)
+        if [[ "$found" == 1 ]]; then
+            echo "Matched text is not shown. Check those files, or use --no-verify if it's a false positive."
             exit 1
         fi
     fi
