@@ -133,9 +133,14 @@ def resolve_target(subjects: list[ProxySubject], selector: ProxySelector) -> Pro
 # --- switching ---
 
 
-def _validated_switch_url(link_url: str) -> str:
-    """Only follow Kaiser's own proxy-switch link."""
-    parsed = urlparse(urljoin(f"https://{KP_HOST}/", link_url))
+def _validated_switch_url(link_url: str, eid: str) -> str:
+    """Only follow Kaiser's own proxy-switch link, for the chart we resolved.
+
+    Kaiser sends LinkUrl relative to the ProxySwitch endpoint (live
+    2026-11-26: `inside.asp?mode=proxyswitch&...`), so resolve it against
+    that URL, not the site root.
+    """
+    parsed = urlparse(urljoin(f"https://{KP_HOST}{PROXY_SWITCH_PATH}", link_url))
     query = parse_qs(parsed.query)
     if (
         parsed.scheme != "https"
@@ -143,6 +148,8 @@ def _validated_switch_url(link_url: str) -> str:
         or parsed.path.lower() != SWITCH_PATH.lower()
         or query.get("mode") != ["proxyswitch"]
         or query.get("action") != ["switchcontext"]
+        or not eid
+        or query.get("eid") != [eid]
     ):
         raise ProxyContextError("Kaiser returned an unexpected switch link. Refusing to follow it.")
     return parsed.geturl()
@@ -164,7 +171,7 @@ async def _get_following_same_host(client: KaiserRequest, url: str) -> int:
 
 
 async def switch_to(client: KaiserRequest, target: ProxySubject) -> None:
-    await _get_following_same_host(client, _validated_switch_url(target.link_url))
+    await _get_following_same_host(client, _validated_switch_url(target.link_url, target.id))
 
 
 async def switch_to_self(client: KaiserRequest) -> None:

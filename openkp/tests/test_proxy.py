@@ -29,7 +29,8 @@ KP = "https://healthy.kaiserpermanente.org"
 
 
 def _link(eid: str) -> str:
-    return f"/mychartcn/inside.asp?mode=proxyswitch&action=switchcontext&src=0&eid={eid}"
+    # Relative to /mychartcn/ProxySwitch, the shape Kaiser sends (live 2026-11-26).
+    return f"inside.asp?mode=proxyswitch&action=switchcontext&src=0&eid={eid}"
 
 
 class FakePortal:
@@ -124,14 +125,29 @@ def test_error_messages_never_include_raw_ids():
 # --- switch link validation ---
 
 
-@pytest.mark.parametrize("link", [_link("WP-kid"), KP + _link("WP-kid")])
+@pytest.mark.parametrize("link", [
+    _link("WP-kid"),
+    "/mychartcn/" + _link("WP-kid"),
+    KP + "/mychartcn/" + _link("WP-kid"),
+])
 def test_valid_switch_links(link):
-    assert proxy._validated_switch_url(link).startswith(KP + "/mychartcn/inside.asp?")
+    assert proxy._validated_switch_url(link, "WP-kid").startswith(KP + "/mychartcn/inside.asp?")
+
+
+def test_root_relative_inside_asp_is_refused():
+    # /inside.asp (outside /mychartcn) isn't the switch endpoint.
+    with pytest.raises(ProxyContextError, match="unexpected switch link"):
+        proxy._validated_switch_url("/" + _link("WP-kid"), "WP-kid")
+
+
+def test_switch_link_for_a_different_chart_is_refused():
+    with pytest.raises(ProxyContextError, match="unexpected switch link"):
+        proxy._validated_switch_url(_link("WP-other"), "WP-kid")
 
 
 @pytest.mark.parametrize("link", [
     "https://evil.example/mychartcn/inside.asp?mode=proxyswitch&action=switchcontext&eid=x",
-    "http://healthy.kaiserpermanente.org" + _link("x"),
+    "http://healthy.kaiserpermanente.org/mychartcn/" + _link("x"),
     "/mychartcn/other.asp?mode=proxyswitch&action=switchcontext&eid=x",
     "/mychartcn/inside.asp?mode=self",
     "/mychartcn/inside.asp?mode=proxyswitch&action=logout&eid=x",
@@ -139,7 +155,7 @@ def test_valid_switch_links(link):
 ])
 def test_invalid_switch_links_are_refused(link):
     with pytest.raises(ProxyContextError, match="unexpected switch link"):
-        proxy._validated_switch_url(link)
+        proxy._validated_switch_url(link, "x")
 
 
 # --- ensure / verify ---
